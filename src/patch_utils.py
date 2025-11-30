@@ -13,6 +13,7 @@ def apply_dype_to_model(model: ModelPatcher, model_type: str, width: int, height
     is_nunchaku = False
     is_qwen = False
     is_z_image = False
+    axes_lens = None
 
     if model_type == "nunchaku":
         is_nunchaku = True
@@ -132,10 +133,23 @@ def apply_dype_to_model(model: ModelPatcher, model_type: str, width: int, height
     elif is_z_image:
         embedder_cls = PosEmbedZImage
 
-    new_pe_embedder = embedder_cls(
-        theta, axes_dim, method, yarn_alt_scaling, enable_dype,
-        dype_scale, dype_exponent, base_resolution, dype_start_sigma, base_patches_override
-    )
+    embedder_kwargs = {
+        "theta": theta,
+        "axes_dim": axes_dim,
+        "method": method,
+        "yarn_alt_scaling": yarn_alt_scaling,
+        "dype": enable_dype,
+        "dype_scale": dype_scale,
+        "dype_exponent": dype_exponent,
+        "base_resolution": base_resolution,
+        "dype_start_sigma": dype_start_sigma,
+        "base_patches": base_patches_override,
+    }
+
+    if is_z_image:
+        embedder_kwargs["axes_lens"] = axes_lens
+
+    new_pe_embedder = embedder_cls(**embedder_kwargs)
         
     m.add_object_patch(target_patch_path, new_pe_embedder)
     
