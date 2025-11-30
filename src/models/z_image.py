@@ -5,7 +5,7 @@ class PosEmbedZImage(DyPEBasePosEmbed):
     """
     DyPE Implementation for Z-Image / NextDiT models.
 
-    Output Format matches `EmbedND`: (B, 1, L, D/2, 2, 2)
+    Output Format matches the original RopeEmbedder: (L, D/2) complex tensor.
     """
     def forward(self, ids: torch.Tensor) -> torch.Tensor:
         pos = ids.float()
@@ -13,14 +13,13 @@ class PosEmbedZImage(DyPEBasePosEmbed):
 
         components = self.get_components(pos, freqs_dtype)
 
-        emb_parts = []
+        freqs_parts = []
         for cos, sin in components:
-            cos_reshaped = cos.view(*cos.shape[:-1], -1, 2)[..., :1]
-            sin_reshaped = sin.view(*sin.shape[:-1], -1, 2)[..., :1]
-            row1 = torch.cat([cos_reshaped, -sin_reshaped], dim=-1)
-            row2 = torch.cat([sin_reshaped, cos_reshaped], dim=-1)
-            matrix = torch.stack([row1, row2], dim=-2)
-            emb_parts.append(matrix)
+            # Raw components are repeated for real-valued RoPE; decimate to per-frequency pairs
+            cos_half = cos[..., ::2].float()
+            sin_half = sin[..., ::2].float()
 
-        emb = torch.cat(emb_parts, dim=-3)
-        return emb.unsqueeze(1).to(ids.device)
+            freqs_parts.append(torch.complex(cos_half, sin_half))
+
+        freqs_cis = torch.cat(freqs_parts, dim=-1)
+        return freqs_cis.to(device=ids.device)
