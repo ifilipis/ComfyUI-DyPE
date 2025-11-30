@@ -9,7 +9,7 @@ class DyPEBasePosEmbed(nn.Module):
     Handles the calculation of DyPE scaling factors and raw (cos, sin) components.
     Subclasses must implement `forward` to format the output for specific model architectures.
     """
-    def __init__(self, theta: int, axes_dim: list[int], method: str = 'yarn', yarn_alt_scaling: bool = False, dype: bool = True, dype_scale: float = 2.0, dype_exponent: float = 2.0, base_resolution: int = 1024, dype_start_sigma: float = 1.0):
+    def __init__(self, theta: int, axes_dim: list[int], method: str = 'yarn', yarn_alt_scaling: bool = False, dype: bool = True, dype_scale: float = 2.0, dype_exponent: float = 2.0, base_resolution: int = 1024, dype_start_sigma: float = 1.0, base_patches: int | None = None):
         super().__init__()
         self.theta = theta
         self.axes_dim = axes_dim
@@ -23,10 +23,14 @@ class DyPEBasePosEmbed(nn.Module):
         
         self.current_timestep = 1.0
         
-        # Dynamic Base Patches: (Resolution // 8) // 2
+        # Dynamic Base Patches
+        # Default: (Resolution // 8) // 2
         # Flux (1024) -> 128 -> 64
         # Qwen (1328) -> 166 -> 83
-        self.base_patches = (self.base_resolution // 8) // 2
+        if base_patches is not None:
+            self.base_patches = base_patches
+        else:
+            self.base_patches = (self.base_resolution // 8) // 2
 
     def set_timestep(self, timestep: float):
         self.current_timestep = timestep
