@@ -145,7 +145,13 @@ def apply_dype_to_model(model: ModelPatcher, model_type: str, width: int, height
         theta, axes_dim, method, yarn_alt_scaling, enable_dype,
         dype_scale, dype_exponent, base_resolution, dype_start_sigma, base_patches
     )
-        
+
+    if is_z_image:
+        # Preserve auxiliary metadata expected by certain Z-Image loaders.
+        for attr in ("axes_lens", "patch_size"):
+            if hasattr(orig_embedder, attr):
+                setattr(new_pe_embedder, attr, getattr(orig_embedder, attr))
+
     m.add_object_patch(target_patch_path, new_pe_embedder)
     
     sigma_max = m.model.model_sampling.sigma_max.item()
