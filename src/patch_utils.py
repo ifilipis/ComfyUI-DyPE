@@ -6,6 +6,7 @@ from .models.flux import PosEmbedFlux
 from .models.nunchaku import PosEmbedNunchaku
 from .models.qwen import PosEmbedQwen
 from .models.z_image import PosEmbedZImage
+from .z_image_overrides import patch_z_image_methods
 
 def apply_dype_to_model(model: ModelPatcher, model_type: str, width: int, height: int, method: str, yarn_alt_scaling: bool, enable_dype: bool, dype_scale: float, dype_exponent: float, base_shift: float, max_shift: float, base_resolution: int = 1024, dype_start_sigma: float = 1.0) -> ModelPatcher:
     m = model.clone()
@@ -125,11 +126,14 @@ def apply_dype_to_model(model: ModelPatcher, model_type: str, width: int, height
         embedder_cls = PosEmbedZImage
 
     new_pe_embedder = embedder_cls(
-        theta, axes_dim, method, yarn_alt_scaling, enable_dype, 
+        theta, axes_dim, method, yarn_alt_scaling, enable_dype,
         dype_scale, dype_exponent, base_resolution, dype_start_sigma
     )
-        
+
     m.add_object_patch(target_patch_path, new_pe_embedder)
+
+    if is_z_image and enable_dype:
+        patch_z_image_methods(m)
     
     sigma_max = m.model.model_sampling.sigma_max.item()
     
