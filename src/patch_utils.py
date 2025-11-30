@@ -70,6 +70,10 @@ def apply_dype_to_model(model: ModelPatcher, model_type: str, width: int, height
                 image_seq_len = (padded_h // patch_size) * (padded_w // patch_size)
                 
                 base_patches = (base_resolution // 8) // 2
+                if is_z_image:
+                    axes_lens = getattr(m.model.diffusion_model, "axes_lens", None)
+                    if axes_lens is not None and len(axes_lens) >= 3:
+                        base_patches = max(int(axes_lens[-2]), int(axes_lens[-1]))
                 base_seq_len = base_patches * base_patches
                 max_seq_len = image_seq_len
 
@@ -101,6 +105,7 @@ def apply_dype_to_model(model: ModelPatcher, model_type: str, width: int, height
             m.add_object_patch("model_sampling", default_sampler)
             del m.model._dype_params
 
+    base_patches_override = None
     try:
         if is_nunchaku:
             orig_embedder = m.model.diffusion_model.model.pos_embed
@@ -108,6 +113,9 @@ def apply_dype_to_model(model: ModelPatcher, model_type: str, width: int, height
         elif is_z_image:
             orig_embedder = m.model.diffusion_model.rope_embedder
             target_patch_path = "diffusion_model.rope_embedder"
+            axes_lens = getattr(m.model.diffusion_model, "axes_lens", None)
+            if axes_lens is not None and len(axes_lens) >= 3:
+                base_patches_override = max(int(axes_lens[-2]), int(axes_lens[-1]))
         else:
             orig_embedder = m.model.diffusion_model.pe_embedder
             target_patch_path = "diffusion_model.pe_embedder"
@@ -125,8 +133,8 @@ def apply_dype_to_model(model: ModelPatcher, model_type: str, width: int, height
         embedder_cls = PosEmbedZImage
 
     new_pe_embedder = embedder_cls(
-        theta, axes_dim, method, yarn_alt_scaling, enable_dype, 
-        dype_scale, dype_exponent, base_resolution, dype_start_sigma
+        theta, axes_dim, method, yarn_alt_scaling, enable_dype,
+        dype_scale, dype_exponent, base_resolution, dype_start_sigma, base_patches_override
     )
         
     m.add_object_patch(target_patch_path, new_pe_embedder)
