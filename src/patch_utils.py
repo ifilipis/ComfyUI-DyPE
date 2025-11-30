@@ -1,4 +1,7 @@
 import math
+import types
+import torch
+import torch.nn.functional as F
 from comfy.model_patcher import ModelPatcher
 from comfy import model_sampling
 
@@ -6,6 +9,162 @@ from .models.flux import PosEmbedFlux
 from .models.nunchaku import PosEmbedNunchaku
 from .models.qwen import PosEmbedQwen
 from .models.z_image import PosEmbedZImage
+
+
+def _patch_nextdit_no_padding(diffusion_model):
+    if getattr(diffusion_model, "_dype_nextdit_no_padding", False):
+        return
+
+    def _dype_patchify_and_embed(self, x, cap_feats, cap_mask, t, num_tokens, transformer_options={}):
+        bsz = x.shape[0] if isinstance(x, torch.Tensor) else len(x)
+        pH = pW = self.patch_size
+        device = x.device if isinstance(x, torch.Tensor) else x[0].device
+
+        if self.pad_tokens_multiple is not None:
+            pad_extra = (-cap_feats.shape[1]) % self.pad_tokens_multiple
+            if pad_extra:
+                cap_feats = torch.cat(
+                    (
+                        cap_feats,
+                        self.cap_pad_token.to(device=cap_feats.device, dtype=cap_feats.dtype, copy=True)
+                        .unsqueeze(0)
+                        .repeat(cap_feats.shape[0], pad_extra, 1),
+                    ),
+                    dim=1,
+                )
+
+        cap_pos_ids = torch.zeros(bsz, cap_feats.shape[1], 3, dtype=torch.float32, device=device)
+        cap_pos_ids[:, :, 0] = torch.arange(cap_feats.shape[1], dtype=torch.float32, device=device) + 1.0
+
+        B, C, H, W = x.shape
+        if H % pH != 0 or W % pW != 0:
+            raise ValueError("DyPE requires height and width divisible by patch size for NextDiT models.")
+
+        h_tokens_exact = H / pH
+        w_tokens_exact = W / pW
+        H_tokens = math.ceil(h_tokens_exact)
+        W_tokens = math.ceil(w_tokens_exact)
+
+        x = self.x_embedder(
+            x.view(B, C, H // pH, pH, W // pW, pW)
+            .permute(0, 2, 4, 3, 5, 1)
+            .flatten(3)
+            .flatten(1, 2)
+        )
+
+        rope_options = transformer_options.get("rope_options", None)
+        base_h_scale = h_tokens_exact / max(H_tokens, 1)
+        base_w_scale = w_tokens_exact / max(W_tokens, 1)
+
+        h_scale = base_h_scale
+        w_scale = base_w_scale
+        h_start = 0.0
+        w_start = 0.0
+        if rope_options is not None:
+            h_scale = rope_options.get("scale_y", 1.0) * h_scale
+            w_scale = rope_options.get("scale_x", 1.0) * w_scale
+
+            h_start = rope_options.get("shift_y", 0.0)
+            w_start = rope_options.get("shift_x", 0.0)
+
+        x_pos_ids = torch.zeros((bsz, x.shape[1], 3), dtype=torch.float32, device=device)
+        x_pos_ids[:, :, 0] = cap_feats.shape[1] + 1
+        x_pos_ids[:, :, 1] = (
+            (torch.arange(H_tokens, dtype=torch.float32, device=device) * h_scale + h_start)
+            .view(-1, 1)
+            .repeat(1, W_tokens)
+            .flatten()
+        )
+        x_pos_ids[:, :, 2] = (
+            (torch.arange(W_tokens, dtype=torch.float32, device=device) * w_scale + w_start)
+            .view(1, -1)
+            .repeat(H_tokens, 1)
+            .flatten()
+        )
+
+        if self.pad_tokens_multiple is not None:
+            pad_extra = (-x.shape[1]) % self.pad_tokens_multiple
+            if pad_extra:
+                x = torch.cat(
+                    (
+                        x,
+                        self.x_pad_token.to(device=x.device, dtype=x.dtype, copy=True)
+                        .unsqueeze(0)
+                        .repeat(x.shape[0], pad_extra, 1),
+                    ),
+                    dim=1,
+                )
+                x_pos_ids = F.pad(x_pos_ids, (0, 0, 0, pad_extra))
+
+        freqs_cis = self.rope_embedder(torch.cat((cap_pos_ids, x_pos_ids), dim=1)).movedim(1, 2)
+
+        for layer in self.context_refiner:
+            cap_feats = layer(cap_feats, cap_mask, freqs_cis[:, : cap_pos_ids.shape[1]], transformer_options=transformer_options)
+
+        padded_img_mask = None
+        for layer in self.noise_refiner:
+            x = layer(x, padded_img_mask, freqs_cis[:, cap_pos_ids.shape[1] :], t, transformer_options=transformer_options)
+
+        padded_full_embed = torch.cat((cap_feats, x), dim=1)
+        mask = None
+        img_sizes = [(H, W)] * bsz
+        l_effective_cap_len = [cap_feats.shape[1]] * bsz
+        return padded_full_embed, mask, img_sizes, l_effective_cap_len, freqs_cis
+
+    def _dype_unpatchify(self, x: torch.Tensor, img_size, cap_size, return_tensor=False):
+        pH = pW = self.patch_size
+        imgs = []
+        for i in range(x.size(0)):
+            H, W = img_size[i]
+            begin = cap_size[i]
+
+            H_tokens = math.ceil(H / pH)
+            W_tokens = math.ceil(W / pW)
+            end = begin + H_tokens * W_tokens
+
+            imgs.append(
+                x[i][begin:end]
+                .view(H_tokens, W_tokens, pH, pW, self.out_channels)
+                .permute(4, 0, 2, 1, 3)
+                .flatten(3, 4)
+                .flatten(1, 2)
+            )
+
+        if return_tensor:
+            imgs = torch.stack(imgs, dim=0)
+        return imgs
+
+    def _dype_forward(self, x, timesteps, context, num_tokens, attention_mask=None, **kwargs):
+        t = 1.0 - timesteps
+        cap_feats = context
+        cap_mask = attention_mask
+        bs, c, h, w = x.shape
+
+        t = self.t_embedder(t * self.time_scale, dtype=x.dtype)
+        adaln_input = t
+
+        cap_feats = self.cap_embedder(cap_feats)
+
+        transformer_options = kwargs.get("transformer_options", {})
+        x_is_tensor = isinstance(x, torch.Tensor)
+        x, mask, img_size, cap_size, freqs_cis = self.patchify_and_embed(
+            x, cap_feats, cap_mask, t, num_tokens, transformer_options=transformer_options
+        )
+        freqs_cis = freqs_cis.to(x.device)
+
+        for layer in self.layers:
+            x = layer(x, mask, freqs_cis, adaln_input, transformer_options=transformer_options)
+
+        x = self.final_layer(x, adaln_input)
+        x = self.unpatchify(x, img_size, cap_size, return_tensor=x_is_tensor)[:, :, :h, :w]
+
+        return -x
+
+    diffusion_model.patchify_and_embed = types.MethodType(_dype_patchify_and_embed, diffusion_model)
+    diffusion_model.unpatchify = types.MethodType(_dype_unpatchify, diffusion_model)
+    diffusion_model._forward = types.MethodType(_dype_forward, diffusion_model)
+
+    diffusion_model._dype_nextdit_no_padding = True
 
 def apply_dype_to_model(model: ModelPatcher, model_type: str, width: int, height: int, method: str, yarn_alt_scaling: bool, enable_dype: bool, dype_scale: float, dype_exponent: float, base_shift: float, max_shift: float, base_resolution: int = 1024, dype_start_sigma: float = 1.0) -> ModelPatcher:
     m = model.clone()
@@ -125,12 +284,15 @@ def apply_dype_to_model(model: ModelPatcher, model_type: str, width: int, height
         embedder_cls = PosEmbedZImage
 
     new_pe_embedder = embedder_cls(
-        theta, axes_dim, method, yarn_alt_scaling, enable_dype, 
+        theta, axes_dim, method, yarn_alt_scaling, enable_dype,
         dype_scale, dype_exponent, base_resolution, dype_start_sigma
     )
-        
+
     m.add_object_patch(target_patch_path, new_pe_embedder)
-    
+
+    if is_z_image:
+        _patch_nextdit_no_padding(m.model.diffusion_model)
+
     sigma_max = m.model.model_sampling.sigma_max.item()
     
     def dype_wrapper_function(model_function, args_dict):
