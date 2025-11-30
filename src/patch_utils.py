@@ -113,6 +113,7 @@ def apply_dype_to_model(model: ModelPatcher, model_type: str, width: int, height
             target_patch_path = "diffusion_model.pe_embedder"
 
         theta, axes_dim = orig_embedder.theta, orig_embedder.axes_dim
+        axes_lens = getattr(m.model.diffusion_model, "axes_lens", None) if is_z_image else None
     except AttributeError:
         raise ValueError("The provided model is not a compatible FLUX/Qwen model structure.")
 
@@ -124,9 +125,14 @@ def apply_dype_to_model(model: ModelPatcher, model_type: str, width: int, height
     elif is_z_image:
         embedder_cls = PosEmbedZImage
 
+    embedder_kwargs = {
+        "axes_lens": axes_lens
+    } if is_z_image else {}
+
     new_pe_embedder = embedder_cls(
-        theta, axes_dim, method, yarn_alt_scaling, enable_dype, 
-        dype_scale, dype_exponent, base_resolution, dype_start_sigma
+        theta, axes_dim, method, yarn_alt_scaling, enable_dype,
+        dype_scale, dype_exponent, base_resolution, dype_start_sigma,
+        **embedder_kwargs
     )
         
     m.add_object_patch(target_patch_path, new_pe_embedder)
