@@ -68,14 +68,18 @@ def apply_dype_to_model(model: ModelPatcher, model_type: str, width: int, height
     except AttributeError:
         raise ValueError("The provided model is not a compatible FLUX/Qwen model structure.")
 
-    def _derive_z_image_base_patches(embedder):
+    def _derive_z_image_base_patches(embedder, diffusion_model=None):
         axes_lens = getattr(embedder, "axes_lens", None)
+        if axes_lens is None and diffusion_model is not None:
+            axes_lens = getattr(diffusion_model, "axes_lens", None)
         if isinstance(axes_lens, (list, tuple)) and len(axes_lens) > 1:
             spatial_axes = [v for v in axes_lens[1:] if isinstance(v, int)]
             if spatial_axes:
                 return max(spatial_axes)
 
         patch_size = getattr(embedder, "patch_size", None)
+        if patch_size is None and diffusion_model is not None:
+            patch_size = getattr(diffusion_model, "patch_size", None)
         if isinstance(patch_size, int) and patch_size > 0:
             baseline_resolution = 512
             baseline_latent = baseline_resolution // 8
@@ -83,7 +87,9 @@ def apply_dype_to_model(model: ModelPatcher, model_type: str, width: int, height
 
         return None
 
-    z_image_base_patches = _derive_z_image_base_patches(orig_embedder) if is_z_image else None
+    z_image_base_patches = None
+    if is_z_image:
+        z_image_base_patches = _derive_z_image_base_patches(orig_embedder, m.model.diffusion_model)
     base_patches = z_image_base_patches if z_image_base_patches is not None else (base_resolution // 8) // 2
 
     if enable_dype and should_patch_schedule:
