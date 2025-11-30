@@ -53,23 +53,27 @@ def apply_dype_to_model(model: ModelPatcher, model_type: str, width: int, height
         if m.model._dype_params == new_dype_params:
             should_patch_schedule = False
 
+    dm = m.model.diffusion_model if hasattr(m.model, "diffusion_model") else None
+
     try:
         if is_nunchaku:
-            orig_embedder = m.model.diffusion_model.model.pos_embed
+            orig_embedder = dm.model.pos_embed
             target_patch_path = "diffusion_model.model.pos_embed"
         elif is_z_image:
-            orig_embedder = m.model.diffusion_model.rope_embedder
+            orig_embedder = dm.rope_embedder
             target_patch_path = "diffusion_model.rope_embedder"
         else:
-            orig_embedder = m.model.diffusion_model.pe_embedder
+            orig_embedder = dm.pe_embedder
             target_patch_path = "diffusion_model.pe_embedder"
 
         theta, axes_dim = orig_embedder.theta, orig_embedder.axes_dim
     except AttributeError:
         raise ValueError("The provided model is not a compatible FLUX/Qwen model structure.")
 
-    def _derive_z_image_base_patches(embedder):
+    def _derive_z_image_base_patches(embedder, diffusion_model):
         axes_lens = getattr(embedder, "axes_lens", None)
+        if axes_lens is None:
+            axes_lens = getattr(diffusion_model, "axes_lens", None)
         if isinstance(axes_lens, (list, tuple)) and len(axes_lens) > 1:
             spatial_axes = [v for v in axes_lens[1:] if isinstance(v, int)]
             if spatial_axes:
@@ -83,7 +87,7 @@ def apply_dype_to_model(model: ModelPatcher, model_type: str, width: int, height
 
         return None
 
-    z_image_base_patches = _derive_z_image_base_patches(orig_embedder) if is_z_image else None
+    z_image_base_patches = _derive_z_image_base_patches(orig_embedder, dm) if is_z_image else None
     base_patches = z_image_base_patches if z_image_base_patches is not None else (base_resolution // 8) // 2
 
     if enable_dype and should_patch_schedule:
@@ -145,6 +149,15 @@ def apply_dype_to_model(model: ModelPatcher, model_type: str, width: int, height
         theta, axes_dim, method, yarn_alt_scaling, enable_dype,
         dype_scale, dype_exponent, base_resolution, dype_start_sigma, base_patches
     )
+
+    if is_z_image:
+        axes_lens = getattr(dm, "axes_lens", getattr(orig_embedder, "axes_lens", None))
+        if axes_lens is not None:
+            new_pe_embedder.axes_lens = axes_lens
+
+        patch_sz = getattr(dm, "patch_size", getattr(orig_embedder, "patch_size", None))
+        if patch_sz is not None:
+            new_pe_embedder.patch_size = patch_sz
         
     m.add_object_patch(target_patch_path, new_pe_embedder)
     
