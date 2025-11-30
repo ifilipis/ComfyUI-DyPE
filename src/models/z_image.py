@@ -15,12 +15,15 @@ class PosEmbedZImage(DyPEBasePosEmbed):
 
         emb_parts = []
         for cos, sin in components:
-            cos_reshaped = cos.view(*cos.shape[:-1], -1, 2)[..., :1]
-            sin_reshaped = sin.view(*sin.shape[:-1], -1, 2)[..., :1]
-            row1 = torch.cat([cos_reshaped, -sin_reshaped], dim=-1)
-            row2 = torch.cat([sin_reshaped, cos_reshaped], dim=-1)
-            matrix = torch.stack([row1, row2], dim=-2)
-            emb_parts.append(matrix)
+            cos_half = cos[..., ::2]
+            sin_half = sin[..., ::2]
+
+            rot_rows = (
+                torch.stack((cos_half, -sin_half), dim=-1),
+                torch.stack((sin_half, cos_half), dim=-1),
+            )
+
+            emb_parts.append(torch.stack(rot_rows, dim=-2))
 
         emb = torch.cat(emb_parts, dim=-3)
         return emb.unsqueeze(1).to(ids.device)
