@@ -5,17 +5,21 @@ from comfy import model_sampling
 from .models.flux import PosEmbedFlux
 from .models.nunchaku import PosEmbedNunchaku
 from .models.qwen import PosEmbedQwen
+from .models.zimage import PosEmbedZImage
 
 def apply_dype_to_model(model: ModelPatcher, model_type: str, width: int, height: int, method: str, yarn_alt_scaling: bool, enable_dype: bool, dype_scale: float, dype_exponent: float, base_shift: float, max_shift: float, base_resolution: int = 1024, dype_start_sigma: float = 1.0) -> ModelPatcher:
     m = model.clone()
-    
+
     is_nunchaku = False
     is_qwen = False
-    
+    is_zimage = False
+
     if model_type == "nunchaku":
         is_nunchaku = True
     elif model_type == "qwen":
         is_qwen = True
+    elif model_type == "zimage":
+        is_zimage = True
     elif model_type == "flux":
         pass
     else: # auto
@@ -27,6 +31,10 @@ def apply_dype_to_model(model: ModelPatcher, model_type: str, width: int, height
             if "QwenImage" in model_class_name:
                 is_qwen = True
                 # print("[DyPE] Auto-detected Qwen Image model.")
+            elif model_class_name == "NextDiT" and hasattr(dm, "axes_lens"):
+                if getattr(dm, "n_heads", 0) == 30 or getattr(dm, "dim", 0) == 3840:
+                    is_zimage = True
+                # print("[DyPE] Auto-detected Z-Image model.")
             elif hasattr(dm, "model") and hasattr(dm.model, "pos_embed"):
                 is_nunchaku = True
                 # print("[DyPE] Auto-detected Nunchaku Flux model.")
@@ -39,7 +47,7 @@ def apply_dype_to_model(model: ModelPatcher, model_type: str, width: int, height
         else:
              raise ValueError("The provided model is not a compatible model.")
 
-    new_dype_params = (width, height, base_shift, max_shift, method, yarn_alt_scaling, base_resolution, dype_start_sigma, is_nunchaku, is_qwen)
+    new_dype_params = (width, height, base_shift, max_shift, method, yarn_alt_scaling, base_resolution, dype_start_sigma, is_nunchaku, is_qwen, is_zimage)
     
     should_patch_schedule = True
     if hasattr(m.model, "_dype_params"):
@@ -57,7 +65,7 @@ def apply_dype_to_model(model: ModelPatcher, model_type: str, width: int, height
             pass
 
         try:
-            if isinstance(m.model.model_sampling, model_sampling.ModelSamplingFlux) or is_qwen:
+            if isinstance(m.model.model_sampling, model_sampling.ModelSamplingFlux) or is_qwen or is_zimage:
                 latent_h, latent_w = height // 8, width // 8
                 padded_h, padded_w = math.ceil(latent_h / patch_size) * patch_size, math.ceil(latent_w / patch_size) * patch_size
                 image_seq_len = (padded_h // patch_size) * (padded_w // patch_size)
@@ -98,6 +106,9 @@ def apply_dype_to_model(model: ModelPatcher, model_type: str, width: int, height
         if is_nunchaku:
             orig_embedder = m.model.diffusion_model.model.pos_embed
             target_patch_path = "diffusion_model.model.pos_embed"
+        elif is_zimage:
+            orig_embedder = m.model.diffusion_model.rope_embedder
+            target_patch_path = "diffusion_model.rope_embedder"
         else:
             orig_embedder = m.model.diffusion_model.pe_embedder
             target_patch_path = "diffusion_model.pe_embedder"
@@ -107,14 +118,18 @@ def apply_dype_to_model(model: ModelPatcher, model_type: str, width: int, height
         raise ValueError("The provided model is not a compatible FLUX/Qwen model structure.")
 
     embedder_cls = PosEmbedFlux
+    embedder_kwargs = {}
     if is_nunchaku:
         embedder_cls = PosEmbedNunchaku
     elif is_qwen:
         embedder_cls = PosEmbedQwen
+    elif is_zimage:
+        embedder_cls = PosEmbedZImage
+        embedder_kwargs["axes_lens"] = getattr(m.model.diffusion_model, "axes_lens", None)
 
     new_pe_embedder = embedder_cls(
-        theta, axes_dim, method, yarn_alt_scaling, enable_dype, 
-        dype_scale, dype_exponent, base_resolution, dype_start_sigma
+        theta, axes_dim, method, yarn_alt_scaling, enable_dype,
+        dype_scale, dype_exponent, base_resolution, dype_start_sigma, **embedder_kwargs
     )
         
     m.add_object_patch(target_patch_path, new_pe_embedder)

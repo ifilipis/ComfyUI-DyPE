@@ -44,7 +44,7 @@ It works by taking advantage of the spectral progression inherent to the diffusi
 This node provides a seamless, "plug-and-play" integration of DyPE into your workflow.
 
 **✨ Key Features:**
-*   **Multi-Architecture Support:** Now supports **FLUX** (Standard), **Nunchaku** (Quantized Flux), and **Qwen Image**.
+*   **Multi-Architecture Support:** Now supports **FLUX** (Standard), **Nunchaku** (Quantized Flux), **Qwen Image**, and **Z-Image (NextDiT)**.
 *   **High-Resolution Generation:** Push models to 4096x4096 and beyond.
 *   **Single-Node Integration:** Simply place the `DyPE for FLUX` node after your model loader to patch the model. No complex workflow changes required.
 *   **Full Compatibility:** Works seamlessly with your existing ComfyUI workflows, samplers, schedulers, and other optimization nodes.
@@ -136,7 +136,7 @@ Using the node is straightforward and designed for minimal workflow disruption.
 ## Changelog
 
 #### v2.1
-*   **New Architecture Support:** Added support for **Qwen Image** and **Nunchaku** (Quantized Flux) models.
+*   **New Architecture Support:** Added support for **Qwen Image**, **Nunchaku** (Quantized Flux), and **Z-Image (NextDiT)** models.
 *   **Modular Architecture:** Refactored codebase into a modular adapter pattern (`src/models/`) to ensure stability and easier updates for future models.
 *   **UI Updates:** Added `model_type` selector for explicit model definition.
 
