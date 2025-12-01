@@ -9,7 +9,7 @@ class DyPEBasePosEmbed(nn.Module):
     Handles the calculation of DyPE scaling factors and raw (cos, sin) components.
     Subclasses must implement `forward` to format the output for specific model architectures.
     """
-    def __init__(self, theta: int, axes_dim: list[int], method: str = 'yarn', yarn_alt_scaling: bool = False, dype: bool = True, dype_scale: float = 2.0, dype_exponent: float = 2.0, base_resolution: int = 1024, dype_start_sigma: float = 1.0):
+    def __init__(self, theta: int, axes_dim: list[int], method: str = 'yarn', yarn_alt_scaling: bool = False, dype: bool = True, dype_scale: float = 2.0, dype_exponent: float = 2.0, base_resolution: int = 1024, dype_start_sigma: float = 1.0, base_patch_grid: tuple[int, int] | None = None):
         super().__init__()
         self.theta = theta
         self.axes_dim = axes_dim
@@ -23,10 +23,22 @@ class DyPEBasePosEmbed(nn.Module):
         
         self.current_timestep = 1.0
         
-        # Dynamic Base Patches: (Resolution // 8) // 2
-        # Flux (1024) -> 128 -> 64
-        # Qwen (1328) -> 166 -> 83
-        self.base_patches = (self.base_resolution // 8) // 2
+        if base_patch_grid is None:
+            base_patch_tokens = max(1, (self.base_resolution // 8) // 2)
+            base_patch_grid = (base_patch_tokens, base_patch_tokens)
+
+        self.base_patch_grid = base_patch_grid
+        self.base_patches = max(self.base_patch_grid)
+
+    def _base_patches_for_axis(self, axis_index: int) -> int:
+        if axis_index == 0:
+            return self.base_patches
+
+        grid_index = axis_index - 1
+        if 0 <= grid_index < len(self.base_patch_grid):
+            return self.base_patch_grid[grid_index]
+
+        return self.base_patches
 
     def set_timestep(self, timestep: float):
         self.current_timestep = timestep
@@ -85,13 +97,14 @@ class DyPEBasePosEmbed(nn.Module):
             }
 
             if i > 0:
-                scale_local = max(1.0, current_patches / self.base_patches)
+                base_axis_patches = self._base_patches_for_axis(i)
+                scale_local = max(1.0, current_patches / base_axis_patches)
                 dype_kwargs['linear_scale'] = scale_local 
                 
                 if scale_global > 1.0:
                     cos, sin = get_1d_dype_yarn_pos_embed(
                         **common_kwargs,
-                        ori_max_pe_len=self.base_patches,
+                        ori_max_pe_len=base_axis_patches,
                         **dype_kwargs
                     )
                 else:
@@ -128,9 +141,10 @@ class DyPEBasePosEmbed(nn.Module):
                 dype_kwargs = {'dype': self.dype, 'current_timestep': self.current_timestep, 'dype_scale': self.dype_scale, 'dype_exponent': self.dype_exponent}
 
                 current_patches_on_axis = int(axis_pos.max().item() - axis_pos.min().item() + 1)
-                if i > 0 and current_patches_on_axis > self.base_patches:
+                base_axis_patches = self._base_patches_for_axis(i)
+                if i > 0 and current_patches_on_axis > base_axis_patches:
                     max_pe_len = torch.tensor(current_patches_on_axis, dtype=freqs_dtype, device=pos.device)
-                    cos, sin = get_1d_yarn_pos_embed(**common_kwargs, max_pe_len=max_pe_len, ori_max_pe_len=self.base_patches, **dype_kwargs, use_aggressive_mscale=True)
+                    cos, sin = get_1d_yarn_pos_embed(**common_kwargs, max_pe_len=max_pe_len, ori_max_pe_len=base_axis_patches, **dype_kwargs, use_aggressive_mscale=True)
                 else:
                     cos, sin = get_1d_ntk_pos_embed(**common_kwargs, ntk_factor=1.0)
                 
