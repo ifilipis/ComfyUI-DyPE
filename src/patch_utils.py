@@ -143,10 +143,10 @@ def apply_dype_to_model(model: ModelPatcher, model_type: str, width: int, height
     m.add_object_patch(target_patch_path, new_pe_embedder)
 
     if is_z_image:
-        def _build_spatial_pos_ids(batch: int, total_len: int, width_tokens: int, cap_len: int, h_scale: float, w_scale: float, h_start: float, w_start: float, device: torch.device):
+        def _build_spatial_pos_ids(batch: int, total_len: int, width_tokens: int, cap_len: int, stride_y: float, stride_x: float, h_start: float, w_start: float, device: torch.device):
             base_pos = torch.arange(total_len, device=device, dtype=torch.float32)
-            y = torch.div(base_pos, width_tokens, rounding_mode='floor') * h_scale + h_start
-            x = torch.remainder(base_pos, width_tokens) * w_scale + w_start
+            y = torch.div(base_pos, width_tokens, rounding_mode='floor') * stride_y + h_start
+            x = torch.remainder(base_pos, width_tokens) * stride_x + w_start
 
             pos = torch.stack([
                 torch.full_like(base_pos, cap_len + 1),
@@ -173,13 +173,13 @@ def apply_dype_to_model(model: ModelPatcher, model_type: str, width: int, height
             x = self.x_embedder(x.view(B, C, H // pH, pH, W // pW, pW).permute(0, 2, 4, 3, 5, 1).flatten(3).flatten(1, 2))
 
             rope_options = transformer_options.get("rope_options", None)
-            h_scale = 1.0
-            w_scale = 1.0
+            rope_scale_y = 1.0
+            rope_scale_x = 1.0
             h_start = 0.0
             w_start = 0.0
             if rope_options is not None:
-                h_scale = rope_options.get("scale_y", 1.0)
-                w_scale = rope_options.get("scale_x", 1.0)
+                rope_scale_y = rope_options.get("scale_y", 1.0)
+                rope_scale_x = rope_options.get("scale_x", 1.0)
 
                 h_start = rope_options.get("shift_y", 0.0)
                 w_start = rope_options.get("shift_x", 0.0)
@@ -190,9 +190,13 @@ def apply_dype_to_model(model: ModelPatcher, model_type: str, width: int, height
 
             H_tokens = math.ceil(original_hw[0] / pH)
             W_tokens = math.ceil(original_hw[1] / pW)
+            token_stride_y = (original_hw[0] / max(1, H_tokens)) * rope_scale_y
+            token_stride_x = (original_hw[1] / max(1, W_tokens)) * rope_scale_x
+            shift_y = h_start * (original_hw[0] / max(1, H_tokens))
+            shift_x = w_start * (original_hw[1] / max(1, W_tokens))
             base_img_tokens = H_tokens * W_tokens
 
-            x_pos_ids = _build_spatial_pos_ids(bsz, base_img_tokens, W_tokens, cap_feats.shape[1], h_scale, w_scale, h_start, w_start, device)
+            x_pos_ids = _build_spatial_pos_ids(bsz, base_img_tokens, W_tokens, cap_feats.shape[1], token_stride_y, token_stride_x, shift_y, shift_x, device)
 
             if self.pad_tokens_multiple is not None:
                 pad_extra = (-x.shape[1]) % self.pad_tokens_multiple
@@ -200,7 +204,7 @@ def apply_dype_to_model(model: ModelPatcher, model_type: str, width: int, height
                     x = torch.cat((x, self.x_pad_token.to(device=x.device, dtype=x.dtype, copy=True).unsqueeze(0).repeat(x.shape[0], pad_extra, 1)), dim=1)
 
             if x.shape[1] != x_pos_ids.shape[1]:
-                x_pos_ids = _build_spatial_pos_ids(bsz, x.shape[1], W_tokens, cap_feats.shape[1], h_scale, w_scale, h_start, w_start, device)
+                x_pos_ids = _build_spatial_pos_ids(bsz, x.shape[1], W_tokens, cap_feats.shape[1], token_stride_y, token_stride_x, shift_y, shift_x, device)
 
             freqs_cis = self.rope_embedder(torch.cat((cap_pos_ids, x_pos_ids), dim=1)).movedim(1, 2)
 
