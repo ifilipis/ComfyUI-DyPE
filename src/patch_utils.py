@@ -1,4 +1,6 @@
 import math
+import types
+import torch
 from comfy.model_patcher import ModelPatcher
 from comfy import model_sampling
 
@@ -13,6 +15,8 @@ def apply_dype_to_model(model: ModelPatcher, model_type: str, width: int, height
     is_nunchaku = False
     is_qwen = False
     is_z_image = False
+
+    base_patches_override = None
 
     if model_type == "nunchaku":
         is_nunchaku = True
@@ -46,6 +50,13 @@ def apply_dype_to_model(model: ModelPatcher, model_type: str, width: int, height
         else:
             raise ValueError("The provided model is not a compatible model.")
 
+    if is_z_image:
+        axes_lens = getattr(m.model.diffusion_model, "axes_lens", None)
+        if isinstance(axes_lens, (list, tuple)) and len(axes_lens) >= 2:
+            base_patches_override = axes_lens[1]
+        elif isinstance(axes_lens, torch.Tensor) and axes_lens.numel() >= 2:
+            base_patches_override = axes_lens.flatten()[1].item()
+
     new_dype_params = (width, height, base_shift, max_shift, method, yarn_alt_scaling, base_resolution, dype_start_sigma, is_nunchaku, is_qwen, is_z_image)
     
     should_patch_schedule = True
@@ -68,8 +79,8 @@ def apply_dype_to_model(model: ModelPatcher, model_type: str, width: int, height
                 latent_h, latent_w = height // 8, width // 8
                 padded_h, padded_w = math.ceil(latent_h / patch_size) * patch_size, math.ceil(latent_w / patch_size) * patch_size
                 image_seq_len = (padded_h // patch_size) * (padded_w // patch_size)
-                
-                base_patches = (base_resolution // 8) // 2
+
+                base_patches = base_patches_override if base_patches_override is not None else (base_resolution // 8) // 2
                 base_seq_len = base_patches * base_patches
                 max_seq_len = image_seq_len
 
@@ -125,12 +136,92 @@ def apply_dype_to_model(model: ModelPatcher, model_type: str, width: int, height
         embedder_cls = PosEmbedZImage
 
     new_pe_embedder = embedder_cls(
-        theta, axes_dim, method, yarn_alt_scaling, enable_dype, 
-        dype_scale, dype_exponent, base_resolution, dype_start_sigma
+        theta, axes_dim, method, yarn_alt_scaling, enable_dype,
+        dype_scale, dype_exponent, base_resolution, dype_start_sigma, base_patches_override
     )
-        
+
     m.add_object_patch(target_patch_path, new_pe_embedder)
-    
+
+    if is_z_image:
+        def _build_spatial_pos_ids(batch: int, total_len: int, width_tokens: int, cap_len: int, h_scale: float, w_scale: float, h_start: float, w_start: float, device: torch.device):
+            base_pos = torch.arange(total_len, device=device, dtype=torch.float32)
+            y = torch.div(base_pos, width_tokens, rounding_mode='floor') * h_scale + h_start
+            x = torch.remainder(base_pos, width_tokens) * w_scale + w_start
+
+            pos = torch.stack([
+                torch.full_like(base_pos, cap_len + 1),
+                y,
+                x
+            ], dim=-1)
+            return pos.unsqueeze(0).repeat(batch, 1, 1)
+
+        def patched_patchify_and_embed(self, x, cap_feats, cap_mask, t, num_tokens, transformer_options={}):
+            bsz = len(x)
+            pH = pW = self.patch_size
+            device = x[0].device
+
+            if self.pad_tokens_multiple is not None:
+                pad_extra = (-cap_feats.shape[1]) % self.pad_tokens_multiple
+                if pad_extra:
+                    cap_pad = self.cap_pad_token.to(device=cap_feats.device, dtype=cap_feats.dtype, copy=True).unsqueeze(0)
+                    cap_feats = torch.cat((cap_feats, cap_pad.repeat(cap_feats.shape[0], pad_extra, 1)), dim=1)
+
+            cap_pos_ids = torch.zeros(bsz, cap_feats.shape[1], 3, dtype=torch.float32, device=device)
+            cap_pos_ids[:, :, 0] = torch.arange(cap_feats.shape[1], dtype=torch.float32, device=device) + 1.0
+
+            B, C, H, W = x.shape
+            x = self.x_embedder(x.view(B, C, H // pH, pH, W // pW, pW).permute(0, 2, 4, 3, 5, 1).flatten(3).flatten(1, 2))
+
+            rope_options = transformer_options.get("rope_options", None)
+            h_scale = 1.0
+            w_scale = 1.0
+            h_start = 0.0
+            w_start = 0.0
+            if rope_options is not None:
+                h_scale = rope_options.get("scale_y", 1.0)
+                w_scale = rope_options.get("scale_x", 1.0)
+
+                h_start = rope_options.get("shift_y", 0.0)
+                w_start = rope_options.get("shift_x", 0.0)
+
+            original_hw = transformer_options.get("dype_original_hw")
+            if original_hw is None:
+                original_hw = (H, W)
+
+            H_tokens = math.ceil(original_hw[0] / pH)
+            W_tokens = math.ceil(original_hw[1] / pW)
+            base_img_tokens = H_tokens * W_tokens
+
+            x_pos_ids = _build_spatial_pos_ids(bsz, base_img_tokens, W_tokens, cap_feats.shape[1], h_scale, w_scale, h_start, w_start, device)
+
+            if self.pad_tokens_multiple is not None:
+                pad_extra = (-x.shape[1]) % self.pad_tokens_multiple
+                if pad_extra:
+                    x = torch.cat((x, self.x_pad_token.to(device=x.device, dtype=x.dtype, copy=True).unsqueeze(0).repeat(x.shape[0], pad_extra, 1)), dim=1)
+
+            if x.shape[1] != x_pos_ids.shape[1]:
+                x_pos_ids = _build_spatial_pos_ids(bsz, x.shape[1], W_tokens, cap_feats.shape[1], h_scale, w_scale, h_start, w_start, device)
+
+            freqs_cis = self.rope_embedder(torch.cat((cap_pos_ids, x_pos_ids), dim=1)).movedim(1, 2)
+
+            for layer in self.context_refiner:
+                cap_feats = layer(cap_feats, cap_mask, freqs_cis[:, :cap_pos_ids.shape[1]], transformer_options=transformer_options)
+
+            padded_img_mask = None
+            for layer in self.noise_refiner:
+                x = layer(x, padded_img_mask, freqs_cis[:, cap_pos_ids.shape[1]:], t, transformer_options=transformer_options)
+
+            padded_full_embed = torch.cat((cap_feats, x), dim=1)
+            mask = None
+            img_sizes = [(H, W)] * bsz
+            l_effective_cap_len = [cap_feats.shape[1]] * bsz
+            return padded_full_embed, mask, img_sizes, l_effective_cap_len, freqs_cis
+
+        m.add_object_patch(
+            "diffusion_model.patchify_and_embed",
+            types.MethodType(patched_patchify_and_embed, m.model.diffusion_model)
+        )
+
     sigma_max = m.model.model_sampling.sigma_max.item()
     
     def dype_wrapper_function(model_function, args_dict):
@@ -143,6 +234,13 @@ def apply_dype_to_model(model: ModelPatcher, model_type: str, width: int, height
                 new_pe_embedder.set_timestep(normalized_timestep)
         
         input_x, c = args_dict.get("input"), args_dict.get("c", {})
+
+        if is_z_image and isinstance(input_x, torch.Tensor) and input_x.dim() >= 4:
+            c = dict(c)
+            transformer_options = dict(c.get("transformer_options", {}))
+            transformer_options["dype_original_hw"] = (input_x.shape[-2], input_x.shape[-1])
+            c["transformer_options"] = transformer_options
+
         return model_function(input_x, args_dict.get("timestep"), **c)
 
     m.set_model_unet_function_wrapper(dype_wrapper_function)
