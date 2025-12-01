@@ -35,18 +35,33 @@ class DyPEBasePosEmbed(nn.Module):
     def set_timestep(self, timestep: float):
         self.current_timestep = timestep
 
-    def _calc_vision_yarn_components(self, pos: torch.Tensor, freqs_dtype: torch.dtype):
+    def _calc_vision_yarn_components(self, pos: torch.Tensor, freqs_dtype: torch.dtype, spatial_step: float | list | tuple | None = None):
         """
         Calculates raw (cos, sin) pairs using DyPE Vision YaRN (Decoupled + Quadratic Aggressive).
         Returns a list of (cos, sin) tuples per axis.
         """
         n_axes = pos.shape[-1]
         components = []
-        
+
+        step_h = 1.0
+        step_w = 1.0
+        if spatial_step is not None:
+            if isinstance(spatial_step, (list, tuple)):
+                if len(spatial_step) > 0 and isinstance(spatial_step[0], (int, float)):
+                    step_h = max(1.0, float(spatial_step[0]))
+                if len(spatial_step) > 1 and isinstance(spatial_step[1], (int, float)):
+                    step_w = max(1.0, float(spatial_step[1]))
+                elif len(spatial_step) > 0:
+                    step_w = step_h
+            elif isinstance(spatial_step, (int, float)):
+                step_h = step_w = max(1.0, float(spatial_step))
+
         if pos.shape[-1] >= 3:
             h_span = int(pos[..., 1].max().item() - pos[..., 1].min().item() + 1)
             w_span = int(pos[..., 2].max().item() - pos[..., 2].min().item() + 1)
-            max_current_patches = max(h_span, w_span)
+            norm_h_span = h_span / step_h
+            norm_w_span = w_span / step_w
+            max_current_patches = max(norm_h_span, norm_w_span)
         else:
             max_current_patches = int(pos.max().item() - pos.min().item() + 1)
         
@@ -69,9 +84,14 @@ class DyPEBasePosEmbed(nn.Module):
             axis_pos = pos[..., i]
             axis_dim = self.axes_dim[i]
             current_patches = int(axis_pos.max().item() - axis_pos.min().item() + 1)
-            
+
+            if i == 1:
+                current_patches = max(1.0, current_patches / step_h)
+            elif i == 2:
+                current_patches = max(1.0, current_patches / step_w)
+
             common_kwargs = {
-                'dim': axis_dim, 
+                'dim': axis_dim,
                 'pos': axis_pos, 
                 'theta': self.theta, 
                 'use_real': True, 
@@ -207,9 +227,9 @@ class DyPEBasePosEmbed(nn.Module):
             
         return components
 
-    def get_components(self, pos: torch.Tensor, freqs_dtype: torch.dtype):
+    def get_components(self, pos: torch.Tensor, freqs_dtype: torch.dtype, spatial_step: float | list | tuple | None = None):
         if self.method == 'vision_yarn':
-            return self._calc_vision_yarn_components(pos, freqs_dtype)
+            return self._calc_vision_yarn_components(pos, freqs_dtype, spatial_step=spatial_step)
         elif self.method == 'yarn':
             return self._calc_yarn_components(pos, freqs_dtype)
         else:
