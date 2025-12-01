@@ -7,6 +7,37 @@ from .models.nunchaku import PosEmbedNunchaku
 from .models.qwen import PosEmbedQwen
 from .models.z_image import PosEmbedZImage
 
+
+def _derive_z_image_base_patches(embedder, base_resolution: int):
+    base_grid_keys = (
+        "base_grid",
+        "base_grid_size",
+        "train_grid",
+        "training_grid",
+        "base_latent_grid",
+    )
+
+    for key in base_grid_keys:
+        grid_value = getattr(embedder, key, None)
+        if isinstance(grid_value, dict):
+            grid_value = grid_value.get("spatial") or grid_value.get("grid")
+
+        if isinstance(grid_value, (list, tuple)) and len(grid_value) >= 2:
+            spatial_dims = [v for v in grid_value[-2:] if isinstance(v, int) and v > 0]
+            if len(spatial_dims) == 2:
+                return max(spatial_dims)
+
+    patch_size = getattr(embedder, "patch_size", None)
+    base_res = getattr(embedder, "base_resolution", None)
+    if not isinstance(base_res, int) or base_res <= 0:
+        base_res = base_resolution
+
+    if isinstance(patch_size, int) and patch_size > 0 and isinstance(base_res, int):
+        base_latent = base_res // 8
+        return max(1, math.ceil(base_latent / patch_size))
+
+    return None
+
 def apply_dype_to_model(model: ModelPatcher, model_type: str, width: int, height: int, method: str, yarn_alt_scaling: bool, enable_dype: bool, dype_scale: float, dype_exponent: float, base_shift: float, max_shift: float, base_resolution: int = 1024, dype_start_sigma: float = 1.0) -> ModelPatcher:
     m = model.clone()
 
@@ -68,22 +99,7 @@ def apply_dype_to_model(model: ModelPatcher, model_type: str, width: int, height
     except AttributeError:
         raise ValueError("The provided model is not a compatible FLUX/Qwen model structure.")
 
-    def _derive_z_image_base_patches(embedder):
-        axes_lens = getattr(embedder, "axes_lens", None)
-        if isinstance(axes_lens, (list, tuple)) and len(axes_lens) > 1:
-            spatial_axes = [v for v in axes_lens[1:] if isinstance(v, int)]
-            if spatial_axes:
-                return max(spatial_axes)
-
-        patch_size = getattr(embedder, "patch_size", None)
-        if isinstance(patch_size, int) and patch_size > 0:
-            baseline_resolution = 512
-            baseline_latent = baseline_resolution // 8
-            return math.ceil(baseline_latent / patch_size)
-
-        return None
-
-    z_image_base_patches = _derive_z_image_base_patches(orig_embedder) if is_z_image else None
+    z_image_base_patches = _derive_z_image_base_patches(orig_embedder, base_resolution) if is_z_image else None
     base_patches = z_image_base_patches if z_image_base_patches is not None else (base_resolution // 8) // 2
 
     if enable_dype and should_patch_schedule:
