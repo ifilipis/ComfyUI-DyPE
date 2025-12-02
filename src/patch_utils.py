@@ -1,4 +1,7 @@
 import math
+import types
+
+import torch
 from comfy.model_patcher import ModelPatcher
 from comfy import model_sampling
 
@@ -117,19 +120,109 @@ def apply_dype_to_model(model: ModelPatcher, model_type: str, width: int, height
         raise ValueError("The provided model is not a compatible FLUX/Qwen model structure.")
 
     embedder_cls = PosEmbedFlux
+    z_image_axes_lens = None
+    z_image_base_patches = None
     if is_nunchaku:
         embedder_cls = PosEmbedNunchaku
     elif is_qwen:
         embedder_cls = PosEmbedQwen
     elif is_z_image:
         embedder_cls = PosEmbedZImage
+        z_image_axes_lens = getattr(m.model.diffusion_model, "axes_lens", None)
+        if isinstance(z_image_axes_lens, (list, tuple)) and len(z_image_axes_lens) >= 3:
+            spatial_axes = [int(z_image_axes_lens[1]), int(z_image_axes_lens[2])]
+            z_image_base_patches = max(spatial_axes)
+        else:
+            z_image_axes_lens = None
+
+    embedder_kwargs = {}
+    if is_z_image:
+        embedder_kwargs["base_patches"] = z_image_base_patches
+        embedder_kwargs["axes_lens"] = z_image_axes_lens
 
     new_pe_embedder = embedder_cls(
-        theta, axes_dim, method, yarn_alt_scaling, enable_dype, 
-        dype_scale, dype_exponent, base_resolution, dype_start_sigma
+        theta, axes_dim, method, yarn_alt_scaling, enable_dype,
+        dype_scale, dype_exponent, base_resolution, dype_start_sigma,
+        **embedder_kwargs,
     )
-        
+
     m.add_object_patch(target_patch_path, new_pe_embedder)
+
+    if is_z_image:
+        def patched_patchify_and_embed(self, x, cap_feats, cap_mask, t, num_tokens, transformer_options={}):
+            bsz = len(x)
+            pH = pW = self.patch_size
+            device = x[0].device
+
+            if self.pad_tokens_multiple is not None:
+                pad_extra = (-cap_feats.shape[1]) % self.pad_tokens_multiple
+                if pad_extra:
+                    pad_token = self.cap_pad_token.to(device=cap_feats.device, dtype=cap_feats.dtype, copy=True)
+                    cap_feats = torch.cat((cap_feats, pad_token.unsqueeze(0).repeat(cap_feats.shape[0], pad_extra, 1)), dim=1)
+
+            cap_pos_ids = torch.zeros(bsz, cap_feats.shape[1], 3, dtype=torch.float32, device=device)
+            cap_pos_ids[:, :, 0] = torch.arange(cap_feats.shape[1], dtype=torch.float32, device=device) + 1.0
+
+            B, C, H, W = x.shape
+            x = self.x_embedder(x.view(B, C, H // pH, pH, W // pW, pW).permute(0, 2, 4, 3, 5, 1).flatten(3).flatten(1, 2))
+
+            rope_options = transformer_options.get("rope_options", None)
+            h_scale = 1.0
+            w_scale = 1.0
+            h_start = 0.0
+            w_start = 0.0
+            if rope_options is not None:
+                h_scale = rope_options.get("scale_y", 1.0)
+                w_scale = rope_options.get("scale_x", 1.0)
+                h_start = rope_options.get("shift_y", 0.0)
+                w_start = rope_options.get("shift_x", 0.0)
+
+            H_tokens, W_tokens = H // pH, W // pW
+            x_pos_ids = torch.zeros((bsz, x.shape[1], 3), dtype=torch.float32, device=device)
+            x_pos_ids[:, :, 0] = cap_feats.shape[1] + 1
+
+            h_positions = (torch.arange(H_tokens, dtype=torch.float32, device=device) * h_scale + h_start).view(-1, 1)
+            w_positions = (torch.arange(W_tokens, dtype=torch.float32, device=device) * w_scale + w_start).view(1, -1)
+
+            x_pos_ids[:, :, 1] = h_positions.repeat(1, W_tokens).flatten()
+            x_pos_ids[:, :, 2] = w_positions.repeat(H_tokens, 1).flatten()
+
+            if self.pad_tokens_multiple is not None:
+                pad_extra = (-x.shape[1]) % self.pad_tokens_multiple
+                if pad_extra:
+                    pad_token = self.x_pad_token.to(device=x.device, dtype=x.dtype, copy=True)
+                    x = torch.cat((x, pad_token.unsqueeze(0).repeat(x.shape[0], pad_extra, 1)), dim=1)
+
+                    total_tokens = x.shape[1]
+                    flat_indices = torch.arange(total_tokens, device=device)
+                    base_rows = torch.clamp(flat_indices // W_tokens, max=H_tokens - 1).float()
+                    base_cols = (flat_indices % W_tokens).float()
+
+                    padded_pos_ids = torch.zeros((bsz, total_tokens, 3), dtype=torch.float32, device=device)
+                    padded_pos_ids[:, :, 0] = cap_feats.shape[1] + 1
+                    padded_pos_ids[:, :, 1] = base_rows * h_scale + h_start
+                    padded_pos_ids[:, :, 2] = base_cols * w_scale + w_start
+                    x_pos_ids = padded_pos_ids
+
+            freqs_cis = self.rope_embedder(torch.cat((cap_pos_ids, x_pos_ids), dim=1)).movedim(1, 2)
+
+            for layer in self.context_refiner:
+                cap_feats = layer(cap_feats, cap_mask, freqs_cis[:, :cap_pos_ids.shape[1]], transformer_options=transformer_options)
+
+            padded_img_mask = None
+            for layer in self.noise_refiner:
+                x = layer(x, padded_img_mask, freqs_cis[:, cap_pos_ids.shape[1]:], t, transformer_options=transformer_options)
+
+            padded_full_embed = torch.cat((cap_feats, x), dim=1)
+            mask = None
+            img_sizes = [(H, W)] * bsz
+            l_effective_cap_len = [cap_feats.shape[1]] * bsz
+            return padded_full_embed, mask, img_sizes, l_effective_cap_len, freqs_cis
+
+        m.add_object_patch(
+            "diffusion_model.patchify_and_embed",
+            types.MethodType(patched_patchify_and_embed, m.model.diffusion_model),
+        )
     
     sigma_max = m.model.model_sampling.sigma_max.item()
     
