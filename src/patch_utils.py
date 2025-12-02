@@ -175,8 +175,8 @@ def apply_dype_to_model(model: ModelPatcher, model_type: str, width: int, height
             requested_hw = transformer_options.get("dype_requested_hw", (height, width))
             rope_base_resolution = transformer_options.get("dype_base_resolution", base_resolution)
 
-            rope_scale_y = requested_hw[0] / float(rope_base_resolution)
-            rope_scale_x = requested_hw[1] / float(rope_base_resolution)
+            rope_scale_y = float(rope_base_resolution) / max(1.0, float(requested_hw[0]))
+            rope_scale_x = float(rope_base_resolution) / max(1.0, float(requested_hw[1]))
             h_start = 0.0
             w_start = 0.0
 
