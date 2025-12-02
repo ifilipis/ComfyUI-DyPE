@@ -76,9 +76,22 @@ def apply_dype_to_model(model: ModelPatcher, model_type: str, width: int, height
 
         try:
             if isinstance(m.model.model_sampling, model_sampling.ModelSamplingFlux) or is_qwen or is_z_image:
+                pad_multiple = getattr(m.model.diffusion_model, "pad_tokens_multiple", None)
+
                 latent_h, latent_w = height // 8, width // 8
-                padded_h, padded_w = math.ceil(latent_h / patch_size) * patch_size, math.ceil(latent_w / patch_size) * patch_size
-                image_seq_len = (padded_h // patch_size) * (padded_w // patch_size)
+                h_tokens = math.ceil(latent_h / patch_size)
+                w_tokens = math.ceil(latent_w / patch_size)
+                total_tokens = h_tokens * w_tokens
+
+                if pad_multiple is not None and pad_multiple > 0:
+                    pad_extra = (-total_tokens) % pad_multiple
+                    if pad_extra:
+                        total_tokens += pad_extra
+                        w_tokens = math.ceil(total_tokens / h_tokens)
+
+                h_span = h_tokens
+                w_span = w_tokens
+                image_seq_len = h_span * w_span
 
                 base_patches = base_patches_override if base_patches_override is not None else (base_resolution // 8) // 2
                 base_seq_len = base_patches * base_patches
@@ -175,10 +188,54 @@ def apply_dype_to_model(model: ModelPatcher, model_type: str, width: int, height
             requested_hw = transformer_options.get("dype_requested_hw", (height, width))
             rope_base_resolution = transformer_options.get("dype_base_resolution", base_resolution)
 
-            rope_scale_y = float(rope_base_resolution) / max(1.0, float(requested_hw[0]))
-            rope_scale_x = float(rope_base_resolution) / max(1.0, float(requested_hw[1]))
+            base_grid = None
+            axes_meta = transformer_options.get("dype_axes_lens", getattr(self, "axes_lens", None))
+            if axes_meta is not None:
+                if isinstance(axes_meta, torch.Tensor):
+                    axes_values = axes_meta.flatten().tolist()
+                else:
+                    axes_values = list(axes_meta)
+
+                if len(axes_values) >= 3:
+                    base_grid = (float(axes_values[-2]), float(axes_values[-1]))
+                elif len(axes_values) >= 2:
+                    base_grid = (float(axes_values[0]), float(axes_values[1]))
+
+            if base_grid is None:
+                rope_base_shape = getattr(self.rope_embedder, "base_shape", None)
+                rope_base_hw = getattr(self.rope_embedder, "base_hw", None)
+                rope_grid = rope_base_shape or rope_base_hw
+                if rope_grid is not None and isinstance(rope_grid, (list, tuple)) and len(rope_grid) >= 2:
+                    base_grid = (float(rope_grid[0]), float(rope_grid[1]))
+
+            if base_grid is None and hasattr(self.rope_embedder, "base_resolution"):
+                base_res = getattr(self.rope_embedder, "base_resolution")
+                if isinstance(base_res, (list, tuple)) and len(base_res) >= 2:
+                    base_grid = (float(base_res[0]), float(base_res[1]))
+
+            if base_grid is None:
+                base_grid = (float(rope_base_resolution), float(rope_base_resolution))
+
+            rope_scale_y = float(base_grid[0]) / max(1.0, float(requested_hw[0]))
+            rope_scale_x = float(base_grid[1]) / max(1.0, float(requested_hw[1]))
+
             h_start = 0.0
             w_start = 0.0
+
+            tile_offset = transformer_options.get("tile_offset")
+            if isinstance(tile_offset, (list, tuple)) and len(tile_offset) >= 2:
+                h_start = float(tile_offset[0])
+                w_start = float(tile_offset[1])
+
+            h_start = float(transformer_options.get("tile_offset_y", h_start))
+            w_start = float(transformer_options.get("tile_offset_x", w_start))
+            h_start = float(transformer_options.get("h_start", h_start))
+            w_start = float(transformer_options.get("w_start", w_start))
+
+            sampler_meta = transformer_options.get("sampler_meta", {})
+            if isinstance(sampler_meta, dict):
+                h_start = float(sampler_meta.get("h_start", sampler_meta.get("tile_offset_y", h_start)))
+                w_start = float(sampler_meta.get("w_start", sampler_meta.get("tile_offset_x", w_start)))
 
             original_hw = transformer_options.get("dype_original_hw")
             if original_hw is None:
@@ -199,8 +256,16 @@ def apply_dype_to_model(model: ModelPatcher, model_type: str, width: int, height
                 if pad_extra:
                     x = torch.cat((x, self.x_pad_token.to(device=x.device, dtype=x.dtype, copy=True).unsqueeze(0).repeat(x.shape[0], pad_extra, 1)), dim=1)
 
-            if x.shape[1] != x_pos_ids.shape[1]:
-                x_pos_ids = _build_spatial_pos_ids(bsz, x.shape[1], W_tokens, cap_feats.shape[1], token_stride_y, token_stride_x, shift_y, shift_x, device)
+            total_img_tokens = x.shape[1]
+            if total_img_tokens != x_pos_ids.shape[1]:
+                padded_W_tokens = max(W_tokens, math.ceil(total_img_tokens / max(1, H_tokens)))
+                x_pos_ids = _build_spatial_pos_ids(bsz, total_img_tokens, padded_W_tokens, cap_feats.shape[1], token_stride_y, token_stride_x, shift_y, shift_x, device)
+
+            if hasattr(self.rope_embedder, "set_axis_strides"):
+                try:
+                    self.rope_embedder.set_axis_strides((None, token_stride_y, token_stride_x))
+                except Exception:
+                    pass
 
             freqs_cis = self.rope_embedder(torch.cat((cap_pos_ids, x_pos_ids), dim=1)).movedim(1, 2)
 
@@ -241,6 +306,8 @@ def apply_dype_to_model(model: ModelPatcher, model_type: str, width: int, height
             transformer_options["dype_original_hw"] = (input_x.shape[-2], input_x.shape[-1])
             transformer_options["dype_requested_hw"] = (height, width)
             transformer_options["dype_base_resolution"] = base_resolution
+            if hasattr(m.model.diffusion_model, "axes_lens"):
+                transformer_options["dype_axes_lens"] = m.model.diffusion_model.axes_lens
             c["transformer_options"] = transformer_options
 
         return model_function(input_x, args_dict.get("timestep"), **c)
