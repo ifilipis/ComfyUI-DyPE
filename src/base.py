@@ -9,7 +9,7 @@ class DyPEBasePosEmbed(nn.Module):
     Handles the calculation of DyPE scaling factors and raw (cos, sin) components.
     Subclasses must implement `forward` to format the output for specific model architectures.
     """
-    def __init__(self, theta: int, axes_dim: list[int], method: str = 'yarn', yarn_alt_scaling: bool = False, dype: bool = True, dype_scale: float = 2.0, dype_exponent: float = 2.0, base_resolution: int = 1024, dype_start_sigma: float = 1.0):
+    def __init__(self, theta: int, axes_dim: list[int], method: str = 'yarn', yarn_alt_scaling: bool = False, dype: bool = True, dype_scale: float = 2.0, dype_exponent: float = 2.0, base_resolution: int = 1024, dype_start_sigma: float = 1.0, base_patches_override: int | None = None):
         super().__init__()
         self.theta = theta
         self.axes_dim = axes_dim
@@ -26,10 +26,35 @@ class DyPEBasePosEmbed(nn.Module):
         # Dynamic Base Patches: (Resolution // 8) // 2
         # Flux (1024) -> 128 -> 64
         # Qwen (1328) -> 166 -> 83
-        self.base_patches = (self.base_resolution // 8) // 2
+        if base_patches_override is not None:
+            self.base_patches = int(base_patches_override)
+        else:
+            self.base_patches = (self.base_resolution // 8) // 2
 
     def set_timestep(self, timestep: float):
         self.current_timestep = timestep
+
+    @staticmethod
+    def _axis_token_span(axis_pos: torch.Tensor) -> float:
+        flat = axis_pos.float().reshape(-1)
+        if flat.numel() <= 1:
+            return 1.0
+
+        min_val, max_val = flat.min(), flat.max()
+        span = max_val - min_val
+        if span <= 0:
+            return 1.0
+
+        sorted_vals = torch.sort(flat).values
+        diffs = torch.diff(sorted_vals)
+        positive_diffs = diffs[diffs > 0]
+        if positive_diffs.numel() == 0:
+            step = span / max(float(flat.numel() - 1), 1.0)
+        else:
+            step = positive_diffs.min()
+
+        step = max(step.item(), 1e-6)
+        return float((span / step) + 1.0)
 
     def _calc_vision_yarn_components(self, pos: torch.Tensor, freqs_dtype: torch.dtype):
         """
@@ -40,11 +65,11 @@ class DyPEBasePosEmbed(nn.Module):
         components = []
         
         if pos.shape[-1] >= 3:
-            h_span = int(pos[..., 1].max().item() - pos[..., 1].min().item() + 1)
-            w_span = int(pos[..., 2].max().item() - pos[..., 2].min().item() + 1)
+            h_span = self._axis_token_span(pos[..., 1])
+            w_span = self._axis_token_span(pos[..., 2])
             max_current_patches = max(h_span, w_span)
         else:
-            max_current_patches = int(pos.max().item() - pos.min().item() + 1)
+            max_current_patches = self._axis_token_span(pos)
         
         scale_global = max(1.0, max_current_patches / self.base_patches)
             
@@ -64,7 +89,7 @@ class DyPEBasePosEmbed(nn.Module):
         for i in range(n_axes):
             axis_pos = pos[..., i]
             axis_dim = self.axes_dim[i]
-            current_patches = int(axis_pos.max().item() - axis_pos.min().item() + 1)
+            current_patches = self._axis_token_span(axis_pos)
             
             common_kwargs = {
                 'dim': axis_dim, 
@@ -112,11 +137,11 @@ class DyPEBasePosEmbed(nn.Module):
         components = []
         
         if pos.shape[-1] >= 3:
-            h_span = int(pos[..., 1].max().item() - pos[..., 1].min().item() + 1)
-            w_span = int(pos[..., 2].max().item() - pos[..., 2].min().item() + 1)
+            h_span = self._axis_token_span(pos[..., 1])
+            w_span = self._axis_token_span(pos[..., 2])
             max_current_patches = max(h_span, w_span)
         else:
-            max_current_patches = int(pos.max().item() - pos.min().item() + 1)
+            max_current_patches = self._axis_token_span(pos)
 
         needs_extrapolation = (max_current_patches > self.base_patches)
 
@@ -127,7 +152,7 @@ class DyPEBasePosEmbed(nn.Module):
                 common_kwargs = {'dim': axis_dim, 'pos': axis_pos, 'theta': self.theta, 'use_real': True, 'repeat_interleave_real': True, 'freqs_dtype': freqs_dtype}
                 dype_kwargs = {'dype': self.dype, 'current_timestep': self.current_timestep, 'dype_scale': self.dype_scale, 'dype_exponent': self.dype_exponent}
 
-                current_patches_on_axis = int(axis_pos.max().item() - axis_pos.min().item() + 1)
+                current_patches_on_axis = self._axis_token_span(axis_pos)
                 if i > 0 and current_patches_on_axis > self.base_patches:
                     max_pe_len = torch.tensor(current_patches_on_axis, dtype=freqs_dtype, device=pos.device)
                     cos, sin = get_1d_yarn_pos_embed(**common_kwargs, max_pe_len=max_pe_len, ori_max_pe_len=self.base_patches, **dype_kwargs, use_aggressive_mscale=True)
@@ -175,11 +200,11 @@ class DyPEBasePosEmbed(nn.Module):
         components = []
 
         if pos.shape[-1] >= 3:
-            h_span = int(pos[..., 1].max().item() - pos[..., 1].min().item() + 1)
-            w_span = int(pos[..., 2].max().item() - pos[..., 2].min().item() + 1)
+            h_span = self._axis_token_span(pos[..., 1])
+            w_span = self._axis_token_span(pos[..., 2])
             max_patches = max(h_span, w_span)
         else:
-            max_patches = int(pos.max().item() - pos.min().item() + 1)
+            max_patches = self._axis_token_span(pos)
 
         unified_scale = max_patches / self.base_patches if max_patches > self.base_patches else 1.0
 
