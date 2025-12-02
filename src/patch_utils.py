@@ -172,8 +172,11 @@ def apply_dype_to_model(model: ModelPatcher, model_type: str, width: int, height
             B, C, H, W = x.shape
             x = self.x_embedder(x.view(B, C, H // pH, pH, W // pW, pW).permute(0, 2, 4, 3, 5, 1).flatten(3).flatten(1, 2))
 
-            rope_scale_y = height / float(base_resolution)
-            rope_scale_x = width / float(base_resolution)
+            requested_hw = transformer_options.get("dype_requested_hw", (height, width))
+            rope_base_resolution = transformer_options.get("dype_base_resolution", base_resolution)
+
+            rope_scale_y = requested_hw[0] / float(rope_base_resolution)
+            rope_scale_x = requested_hw[1] / float(rope_base_resolution)
             h_start = 0.0
             w_start = 0.0
 
@@ -236,6 +239,8 @@ def apply_dype_to_model(model: ModelPatcher, model_type: str, width: int, height
             c = dict(c)
             transformer_options = dict(c.get("transformer_options", {}))
             transformer_options["dype_original_hw"] = (input_x.shape[-2], input_x.shape[-1])
+            transformer_options["dype_requested_hw"] = (height, width)
+            transformer_options["dype_base_resolution"] = base_resolution
             c["transformer_options"] = transformer_options
 
         return model_function(input_x, args_dict.get("timestep"), **c)
