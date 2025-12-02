@@ -192,15 +192,21 @@ def apply_dype_to_model(model: ModelPatcher, model_type: str, width: int, height
             shift_x = w_start * (original_hw[1] / max(1, W_tokens))
             base_img_tokens = H_tokens * W_tokens
 
-            x_pos_ids = _build_spatial_pos_ids(bsz, base_img_tokens, W_tokens, cap_feats.shape[1], token_stride_y, token_stride_x, shift_y, shift_x, device)
-
+            pad_extra = 0
             if self.pad_tokens_multiple is not None:
                 pad_extra = (-x.shape[1]) % self.pad_tokens_multiple
                 if pad_extra:
                     x = torch.cat((x, self.x_pad_token.to(device=x.device, dtype=x.dtype, copy=True).unsqueeze(0).repeat(x.shape[0], pad_extra, 1)), dim=1)
 
-            if x.shape[1] != x_pos_ids.shape[1]:
-                x_pos_ids = _build_spatial_pos_ids(bsz, x.shape[1], W_tokens, cap_feats.shape[1], token_stride_y, token_stride_x, shift_y, shift_x, device)
+            if x.shape[1] != base_img_tokens:
+                W_tokens = math.ceil(original_hw[1] / pW)
+                H_tokens = math.ceil(x.shape[1] / W_tokens)
+                token_stride_y = (original_hw[0] / max(1, H_tokens)) * rope_scale_y
+                token_stride_x = (original_hw[1] / max(1, W_tokens)) * rope_scale_x
+                shift_y = h_start * (original_hw[0] / max(1, H_tokens))
+                shift_x = w_start * (original_hw[1] / max(1, W_tokens))
+
+            x_pos_ids = _build_spatial_pos_ids(bsz, x.shape[1], W_tokens, cap_feats.shape[1], token_stride_y, token_stride_x, shift_y, shift_x, device)
 
             freqs_cis = self.rope_embedder(torch.cat((cap_pos_ids, x_pos_ids), dim=1)).movedim(1, 2)
 
@@ -208,6 +214,9 @@ def apply_dype_to_model(model: ModelPatcher, model_type: str, width: int, height
                 cap_feats = layer(cap_feats, cap_mask, freqs_cis[:, :cap_pos_ids.shape[1]], transformer_options=transformer_options)
 
             padded_img_mask = None
+            if pad_extra:
+                padded_img_mask = torch.zeros((bsz, x.shape[1]), dtype=torch.bool, device=x.device)
+                padded_img_mask[:, -pad_extra:] = True
             for layer in self.noise_refiner:
                 x = layer(x, padded_img_mask, freqs_cis[:, cap_pos_ids.shape[1]:], t, transformer_options=transformer_options)
 
