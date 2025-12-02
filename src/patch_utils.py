@@ -172,17 +172,10 @@ def apply_dype_to_model(model: ModelPatcher, model_type: str, width: int, height
             B, C, H, W = x.shape
             x = self.x_embedder(x.view(B, C, H // pH, pH, W // pW, pW).permute(0, 2, 4, 3, 5, 1).flatten(3).flatten(1, 2))
 
-            rope_options = transformer_options.get("rope_options", None)
-            rope_scale_y = 1.0
-            rope_scale_x = 1.0
+            rope_scale_y = height / float(base_resolution)
+            rope_scale_x = width / float(base_resolution)
             h_start = 0.0
             w_start = 0.0
-            if rope_options is not None:
-                rope_scale_y = rope_options.get("scale_y", 1.0)
-                rope_scale_x = rope_options.get("scale_x", 1.0)
-
-                h_start = rope_options.get("shift_y", 0.0)
-                w_start = rope_options.get("shift_x", 0.0)
 
             original_hw = transformer_options.get("dype_original_hw")
             if original_hw is None:
