@@ -201,8 +201,42 @@ def apply_dype_to_model(model: ModelPatcher, model_type: str, width: int, height
 
             x_pos_ids = torch.zeros((bsz, x_emb.shape[1], 3), dtype=torch.float32, device=device)
             x_pos_ids[:, :, 0] = cap_feats.shape[1] + 1
-            x_pos_ids[:, :, 1] = (torch.arange(H_tokens, dtype=torch.float32, device=device) * h_scale + h_start).view(-1, 1).repeat(1, W_tokens).flatten()
-            x_pos_ids[:, :, 2] = (torch.arange(W_tokens, dtype=torch.float32, device=device) * w_scale + w_start).view(1, -1).repeat(H_tokens, 1).flatten()
+
+            resize_progress = 0.0
+            if hasattr(self, "rope_embedder"):
+                current_timestep = getattr(self.rope_embedder, "current_timestep", 1.0)
+                dype_start_sigma = getattr(self.rope_embedder, "dype_start_sigma", 1.0)
+                dype_exponent = getattr(self.rope_embedder, "dype_exponent", 2.0)
+
+                if current_timestep > dype_start_sigma:
+                    t_norm = 1.0
+                else:
+                    t_norm = max(current_timestep / dype_start_sigma, 0.0)
+
+                resize_progress = 1.0 - (t_norm ** dype_exponent)
+
+            def build_axis_positions(tokens: int, base_tokens: int | None, scale: float, shift: float):
+                if base_tokens is not None:
+                    base_grid = torch.linspace(0, max(base_tokens - 1, 0), steps=tokens, device=device, dtype=torch.float32)
+                    target_extent = base_tokens * scale - 1 if tokens > 1 else 0.0
+                    target_grid = torch.linspace(0, max(target_extent, 0.0), steps=tokens, device=device, dtype=torch.float32)
+                    axis_positions = base_grid + (target_grid - base_grid) * resize_progress
+                else:
+                    axis_positions = torch.arange(tokens, dtype=torch.float32, device=device) * scale
+
+                if shift != 0.0:
+                    axis_positions = axis_positions + shift
+
+                return axis_positions
+
+            base_h_tokens = base_hw[0] if base_hw is not None else None
+            base_w_tokens = base_hw[1] if base_hw is not None else None
+
+            h_positions = build_axis_positions(H_tokens, base_h_tokens, h_scale, h_start)
+            w_positions = build_axis_positions(W_tokens, base_w_tokens, w_scale, w_start)
+
+            x_pos_ids[:, :, 1] = h_positions.view(-1, 1).repeat(1, W_tokens).flatten()
+            x_pos_ids[:, :, 2] = w_positions.view(1, -1).repeat(H_tokens, 1).flatten()
 
             if self.pad_tokens_multiple is not None:
                 pad_extra = (-x_emb.shape[1]) % self.pad_tokens_multiple
