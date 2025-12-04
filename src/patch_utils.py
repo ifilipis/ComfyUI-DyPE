@@ -191,16 +191,22 @@ def apply_dype_to_model(model: ModelPatcher, model_type: str, width: int, height
             dype_blend_factor = None
             if rope_embedder is not None:
                 dype_start_sigma = getattr(rope_embedder, "dype_start_sigma", None)
+                dype_scale = getattr(rope_embedder, "dype_scale", None)
                 dype_exponent = getattr(rope_embedder, "dype_exponent", None)
                 current_timestep = getattr(rope_embedder, "current_timestep", None)
 
-                if all(value is not None for value in (dype_start_sigma, dype_exponent, current_timestep)) and dype_start_sigma > 0:
+                if all(value is not None for value in (dype_start_sigma, dype_scale, dype_exponent, current_timestep)) and dype_start_sigma > 0:
                     if current_timestep > dype_start_sigma:
                         t_norm = 1.0
                     else:
                         t_norm = current_timestep / dype_start_sigma
 
-                    dype_blend_factor = math.pow(t_norm, dype_exponent)
+                    k_t = dype_scale * math.pow(t_norm, dype_exponent)
+                    shift_progress = base_shift + (max_shift - base_shift) * min(k_t, 1.0)
+                    if max_shift > 0:
+                        dype_blend_factor = max(0.0, min(shift_progress / max_shift, 1.0))
+                    else:
+                        dype_blend_factor = 0.0
 
             H_tokens, W_tokens = H // pH, W // pW
             if base_hw is not None and len(base_hw) == 2 and base_hw[0] > 0 and base_hw[1] > 0:
