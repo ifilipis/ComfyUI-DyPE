@@ -27,6 +27,9 @@ class DyPEBasePosEmbed(nn.Module):
         # Flux/Qwen default: (Resolution // 8) // 2
         self.base_patches = base_patches if base_patches is not None else (self.base_resolution // 8) // 2
 
+        # Z-Image grid scaling context. Populated by patcher when grid scaling is active.
+        self._grid_scale_info: dict | None = None
+
     def set_timestep(self, timestep: float):
         self.current_timestep = timestep
 
@@ -39,8 +42,8 @@ class DyPEBasePosEmbed(nn.Module):
         components = []
         
         if pos.shape[-1] >= 3:
-            h_span = int(pos[..., 1].max().item() - pos[..., 1].min().item() + 1)
-            w_span = int(pos[..., 2].max().item() - pos[..., 2].min().item() + 1)
+            h_span = self._get_axis_patch_length(pos, 1)
+            w_span = self._get_axis_patch_length(pos, 2)
             max_current_patches = max(h_span, w_span)
         else:
             max_current_patches = int(pos.max().item() - pos.min().item() + 1)
@@ -66,7 +69,7 @@ class DyPEBasePosEmbed(nn.Module):
         for i in range(n_axes):
             axis_pos = pos[..., i]
             axis_dim = self.axes_dim[i]
-            current_patches = int(axis_pos.max().item() - axis_pos.min().item() + 1)
+            current_patches = self._get_axis_patch_length(pos, i)
             
             common_kwargs = {
                 'dim': axis_dim, 
@@ -119,8 +122,8 @@ class DyPEBasePosEmbed(nn.Module):
         components = []
         
         if pos.shape[-1] >= 3:
-            h_span = int(pos[..., 1].max().item() - pos[..., 1].min().item() + 1)
-            w_span = int(pos[..., 2].max().item() - pos[..., 2].min().item() + 1)
+            h_span = self._get_axis_patch_length(pos, 1)
+            w_span = self._get_axis_patch_length(pos, 2)
             max_current_patches = max(h_span, w_span)
         else:
             max_current_patches = int(pos.max().item() - pos.min().item() + 1)
@@ -137,7 +140,7 @@ class DyPEBasePosEmbed(nn.Module):
                 common_kwargs = {'dim': axis_dim, 'pos': axis_pos, 'theta': self.theta, 'use_real': True, 'repeat_interleave_real': True, 'freqs_dtype': freqs_dtype}
                 dype_kwargs = {'dype': self.dype, 'current_timestep': self.current_timestep, 'dype_scale': self.dype_scale, 'dype_exponent': self.dype_exponent}
 
-                current_patches_on_axis = int(axis_pos.max().item() - axis_pos.min().item() + 1)
+                current_patches_on_axis = self._get_axis_patch_length(pos, i)
                 if i > 0 and current_patches_on_axis > self.base_patches:
                     max_pe_len = torch.tensor(current_patches_on_axis, dtype=freqs_dtype, device=pos.device)
                     cos, sin = get_1d_yarn_pos_embed(**common_kwargs, max_pe_len=max_pe_len, ori_max_pe_len=self.base_patches, **dype_kwargs, use_aggressive_mscale=True)
@@ -164,7 +167,8 @@ class DyPEBasePosEmbed(nn.Module):
                 axis_dim = self.axes_dim[i]
                 
                 if i > 0 and needs_extrapolation:
-                    offset_indices = axis_pos.long() - axis_pos.long().min()
+                    axis_scale = self._get_axis_scale(i)
+                    offset_indices = torch.round((axis_pos - axis_pos.min()) / axis_scale).long()
                     pos_indices = offset_indices.view(-1)
                     
                     cos = cos_full_spatial[pos_indices].view(*axis_pos.shape, -1)
@@ -185,8 +189,8 @@ class DyPEBasePosEmbed(nn.Module):
         components = []
 
         if pos.shape[-1] >= 3:
-            h_span = int(pos[..., 1].max().item() - pos[..., 1].min().item() + 1)
-            w_span = int(pos[..., 2].max().item() - pos[..., 2].min().item() + 1)
+            h_span = self._get_axis_patch_length(pos, 1)
+            w_span = self._get_axis_patch_length(pos, 2)
             max_patches = max(h_span, w_span)
         else:
             max_patches = int(pos.max().item() - pos.min().item() + 1)
@@ -223,3 +227,39 @@ class DyPEBasePosEmbed(nn.Module):
             
     def forward(self, ids: torch.Tensor) -> torch.Tensor:
         raise NotImplementedError("Base class does not implement forward. Use a specific model subclass.")
+
+    def set_grid_scale(self, h_scale: float = 1.0, w_scale: float = 1.0, h_tokens: int | None = None, w_tokens: int | None = None):
+        """Stores grid-scaling context so DyPE can respect Z-Image scaling without overriding algorithms."""
+        self._grid_scale_info = {
+            "h_scale": max(h_scale, 1e-6),
+            "w_scale": max(w_scale, 1e-6),
+            "h_tokens": h_tokens,
+            "w_tokens": w_tokens,
+        }
+
+    def _get_axis_scale(self, axis_idx: int) -> float:
+        if self._grid_scale_info is None:
+            return 1.0
+        if axis_idx == 1:
+            return self._grid_scale_info.get("h_scale", 1.0)
+        if axis_idx == 2:
+            return self._grid_scale_info.get("w_scale", 1.0)
+        return 1.0
+
+    def _get_axis_patch_length(self, pos: torch.Tensor, axis_idx: int) -> int:
+        axis_pos = pos[..., axis_idx]
+        base_tokens = int(axis_pos.max().item() - axis_pos.min().item() + 1)
+
+        if self._grid_scale_info is not None and pos.shape[-1] >= 3 and axis_idx in (1, 2):
+            scale = self._get_axis_scale(axis_idx)
+            token_override = None
+            if axis_idx == 1:
+                token_override = self._grid_scale_info.get("h_tokens")
+            elif axis_idx == 2:
+                token_override = self._grid_scale_info.get("w_tokens")
+
+            tokens = token_override if token_override is not None else base_tokens
+            scaled_length = int(math.ceil(tokens * scale))
+            return max(scaled_length, 1)
+
+        return base_tokens

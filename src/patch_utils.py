@@ -215,6 +215,9 @@ def apply_dype_to_model(model: ModelPatcher, model_type: str, width: int, height
             h_scale = rope_options.get("scale_y", _blend_scale(default_h_scale)) if rope_options is not None else _blend_scale(default_h_scale)
             w_scale = rope_options.get("scale_x", _blend_scale(default_w_scale)) if rope_options is not None else _blend_scale(default_w_scale)
 
+            if rope_embedder is not None and hasattr(rope_embedder, "set_grid_scale"):
+                rope_embedder.set_grid_scale(h_scale, w_scale, H_tokens, W_tokens)
+
             h_start = rope_options.get("shift_y", 0.0) if rope_options is not None else 0.0
             w_start = rope_options.get("shift_x", 0.0) if rope_options is not None else 0.0
 
