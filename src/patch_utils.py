@@ -80,33 +80,34 @@ def apply_dype_to_model(model: ModelPatcher, model_type: str, width: int, height
         derived_base_patches = (base_resolution // 8) // 2
         derived_base_seq_len = derived_base_patches * derived_base_patches
 
-    if enable_dype and should_patch_schedule:
+    def _compute_dype_shift(base_len: int, seq_len: int) -> float:
+        if seq_len <= base_len:
+            return max(0.0, base_shift)
+
+        slope = (max_shift - base_shift) / (seq_len - base_len)
+        intercept = base_shift - slope * base_len
+        return max(0.0, seq_len * slope + intercept)
+
+    dype_shift = None
+
+    if enable_dype:
         try:
             if isinstance(m.model.model_sampling, model_sampling.ModelSamplingFlux) or is_qwen or is_zimage:
                 latent_h, latent_w = height // 8, width // 8
                 padded_h, padded_w = math.ceil(latent_h / patch_size) * patch_size, math.ceil(latent_w / patch_size) * patch_size
                 image_seq_len = (padded_h // patch_size) * (padded_w // patch_size)
 
-                base_seq_len = derived_base_seq_len
-                max_seq_len = image_seq_len
+                dype_shift = _compute_dype_shift(derived_base_seq_len, image_seq_len)
 
-                if max_seq_len <= base_seq_len:
-                    dype_shift = base_shift
-                else:
-                    slope = (max_shift - base_shift) / (max_seq_len - base_seq_len)
-                    intercept = base_shift - slope * base_seq_len
-                    dype_shift = image_seq_len * slope + intercept
+                if should_patch_schedule:
+                    class DypeModelSamplingFlux(model_sampling.ModelSamplingFlux, model_sampling.CONST):
+                        pass
 
-                dype_shift = max(0.0, dype_shift)
+                    new_model_sampler = DypeModelSamplingFlux(m.model.model_config)
+                    new_model_sampler.set_parameters(shift=dype_shift)
 
-                class DypeModelSamplingFlux(model_sampling.ModelSamplingFlux, model_sampling.CONST):
-                    pass
-
-                new_model_sampler = DypeModelSamplingFlux(m.model.model_config)
-                new_model_sampler.set_parameters(shift=dype_shift)
-
-                m.add_object_patch("model_sampling", new_model_sampler)
-                m.model._dype_params = new_dype_params
+                    m.add_object_patch("model_sampling", new_model_sampler)
+                    m.model._dype_params = new_dype_params
         except:
             pass
 
@@ -146,6 +147,11 @@ def apply_dype_to_model(model: ModelPatcher, model_type: str, width: int, height
         theta, axes_dim, method, yarn_alt_scaling, enable_dype,
         dype_scale, dype_exponent, base_resolution, dype_start_sigma, embedder_base_patches
     )
+
+    new_pe_embedder._dype_base_shift = base_shift
+    new_pe_embedder._dype_max_shift = max_shift
+    if dype_shift is not None:
+        new_pe_embedder._dype_shift = dype_shift
 
     m.add_object_patch(target_patch_path, new_pe_embedder)
 
@@ -194,7 +200,16 @@ def apply_dype_to_model(model: ModelPatcher, model_type: str, width: int, height
                 dype_exponent = getattr(rope_embedder, "dype_exponent", None)
                 current_timestep = getattr(rope_embedder, "current_timestep", None)
 
-                if all(value is not None for value in (dype_start_sigma, dype_exponent, current_timestep)) and dype_start_sigma > 0:
+                base_shift_val = getattr(rope_embedder, "_dype_base_shift", None)
+                max_shift_val = getattr(rope_embedder, "_dype_max_shift", None)
+                dype_shift_val = getattr(rope_embedder, "_dype_shift", None)
+
+                if all(value is not None for value in (base_shift_val, max_shift_val, dype_shift_val)):
+                    shift_range = max_shift_val - base_shift_val
+                    if shift_range != 0:
+                        dype_blend_factor = min(max((dype_shift_val - base_shift_val) / shift_range, 0.0), 1.0)
+
+                if dype_blend_factor is None and all(value is not None for value in (dype_start_sigma, dype_exponent, current_timestep)) and dype_start_sigma > 0:
                     if current_timestep > dype_start_sigma:
                         t_norm = 1.0
                     else:
