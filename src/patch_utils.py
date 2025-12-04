@@ -230,6 +230,9 @@ def apply_dype_to_model(model: ModelPatcher, model_type: str, width: int, height
                     x_emb = torch.cat((x_emb, pad_token), dim=1)
                     x_pos_ids = F.pad(x_pos_ids, (0, 0, 0, pad_extra))
 
+            if hasattr(self, "rope_embedder") and hasattr(self.rope_embedder, "set_grid_overrides"):
+                self.rope_embedder.set_grid_overrides(grid_shape=(H_tokens, W_tokens), grid_scale=(h_scale, w_scale))
+
             freqs_cis = self.rope_embedder(torch.cat((cap_pos_ids, x_pos_ids), dim=1)).movedim(1, 2)
 
             for layer in self.context_refiner:
