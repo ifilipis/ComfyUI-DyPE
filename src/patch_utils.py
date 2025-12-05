@@ -143,7 +143,12 @@ def apply_dype_to_model(model: ModelPatcher, model_type: str, width: int, height
     elif is_zimage:
         embedder_cls = PosEmbedZImage
 
-    embedder_base_patches = derived_base_patches if is_zimage else None
+    embedder_base_patches = None
+    if is_zimage:
+        if base_patch_h_tokens is not None and base_patch_w_tokens is not None:
+            embedder_base_patches = (base_patch_h_tokens, base_patch_w_tokens)
+        elif derived_base_patches is not None:
+            embedder_base_patches = (derived_base_patches, derived_base_patches)
 
     new_pe_embedder = embedder_cls(
         theta, axes_dim, method, yarn_alt_scaling, enable_dype,
@@ -276,18 +281,6 @@ def apply_dype_to_model(model: ModelPatcher, model_type: str, width: int, height
         if getattr(m.model, "_dype_zimage_override_active", False):
             current_step = getattr(m.model, "_dype_zimage_step_count", 0) + 1
             m.model._dype_zimage_step_count = current_step
-
-            if current_sigma is not None and current_sigma <= dype_start_sigma:
-                original_fn = getattr(m.model.diffusion_model, "_dype_original_patchify_and_embed", None)
-                if original_fn is not None:
-                    m.model.diffusion_model.patchify_and_embed = original_fn
-
-                if hasattr(m.model.diffusion_model, "_dype_base_hw"):
-                    delattr(m.model.diffusion_model, "_dype_base_hw")
-
-                new_pe_embedder.base_patches = default_base_patches
-
-                m.model._dype_zimage_override_active = False
 
         return output
 
