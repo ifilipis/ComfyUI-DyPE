@@ -30,6 +30,50 @@ class DyPEBasePosEmbed(nn.Module):
     def set_timestep(self, timestep: float):
         self.current_timestep = timestep
 
+    def _analyze_position_grid(self, pos: torch.Tensor):
+        """
+        Inspect scaled RoPE coordinates and return per-axis stats.
+
+        This keeps DyPE's scaling math aligned with Z-Image grids where
+        coordinates may be scaled (e.g., step sizes != 1).
+        """
+        axis_stats = []
+
+        for i in range(pos.shape[-1]):
+            axis_pos = pos[..., i]
+            flat = axis_pos.flatten()
+
+            min_val = flat.min()
+            max_val = flat.max()
+
+            step = 1.0
+            if flat.numel() > 1:
+                unique_vals = torch.unique(flat)
+                if unique_vals.numel() > 1:
+                    diffs = torch.diff(unique_vals)
+                    positive_diffs = diffs[diffs > 0]
+                    if positive_diffs.numel() > 0:
+                        step = float(positive_diffs.min().item())
+
+            if step <= 0:
+                step = 1.0
+
+            span = (max_val - min_val).item()
+            approx_steps = span / step if step > 0 else span
+            patch_count = int(round(approx_steps)) + 1
+
+            unique_count = int(torch.unique(flat).numel())
+            patch_count = max(patch_count, unique_count, 1)
+
+            axis_stats.append({
+                'patch_count': patch_count,
+                'step': step,
+                'min': float(min_val.item()),
+                'max': float(max_val.item())
+            })
+
+        return axis_stats
+
     def _calc_vision_yarn_components(self, pos: torch.Tensor, freqs_dtype: torch.dtype):
         """
         Calculates raw (cos, sin) pairs using DyPE Vision YaRN (Decoupled + Quadratic Aggressive).
@@ -37,14 +81,16 @@ class DyPEBasePosEmbed(nn.Module):
         """
         n_axes = pos.shape[-1]
         components = []
-        
+
+        axis_stats = self._analyze_position_grid(pos)
+
         if pos.shape[-1] >= 3:
-            h_span = int(pos[..., 1].max().item() - pos[..., 1].min().item() + 1)
-            w_span = int(pos[..., 2].max().item() - pos[..., 2].min().item() + 1)
+            h_span = axis_stats[1]['patch_count']
+            w_span = axis_stats[2]['patch_count']
             max_current_patches = max(h_span, w_span)
         else:
-            max_current_patches = int(pos.max().item() - pos.min().item() + 1)
-        
+            max_current_patches = axis_stats[0]['patch_count']
+
         scale_global = max(1.0, max_current_patches / self.base_patches)
             
         mscale_start = 0.1 * math.log(scale_global) + 1.0
@@ -66,7 +112,7 @@ class DyPEBasePosEmbed(nn.Module):
         for i in range(n_axes):
             axis_pos = pos[..., i]
             axis_dim = self.axes_dim[i]
-            current_patches = int(axis_pos.max().item() - axis_pos.min().item() + 1)
+            current_patches = axis_stats[i]['patch_count']
             
             common_kwargs = {
                 'dim': axis_dim, 
@@ -117,13 +163,15 @@ class DyPEBasePosEmbed(nn.Module):
         """
         n_axes = pos.shape[-1]
         components = []
-        
+
+        axis_stats = self._analyze_position_grid(pos)
+
         if pos.shape[-1] >= 3:
-            h_span = int(pos[..., 1].max().item() - pos[..., 1].min().item() + 1)
-            w_span = int(pos[..., 2].max().item() - pos[..., 2].min().item() + 1)
+            h_span = axis_stats[1]['patch_count']
+            w_span = axis_stats[2]['patch_count']
             max_current_patches = max(h_span, w_span)
         else:
-            max_current_patches = int(pos.max().item() - pos.min().item() + 1)
+            max_current_patches = axis_stats[0]['patch_count']
 
         needs_extrapolation = (max_current_patches > self.base_patches)
 
@@ -137,38 +185,29 @@ class DyPEBasePosEmbed(nn.Module):
                 common_kwargs = {'dim': axis_dim, 'pos': axis_pos, 'theta': self.theta, 'use_real': True, 'repeat_interleave_real': True, 'freqs_dtype': freqs_dtype}
                 dype_kwargs = {'dype': self.dype, 'current_timestep': self.current_timestep, 'dype_scale': self.dype_scale, 'dype_exponent': self.dype_exponent}
 
-                current_patches_on_axis = int(axis_pos.max().item() - axis_pos.min().item() + 1)
+                current_patches_on_axis = axis_stats[i]['patch_count']
                 if i > 0 and current_patches_on_axis > self.base_patches:
                     max_pe_len = torch.tensor(current_patches_on_axis, dtype=freqs_dtype, device=pos.device)
                     cos, sin = get_1d_yarn_pos_embed(**common_kwargs, max_pe_len=max_pe_len, ori_max_pe_len=self.base_patches, **dype_kwargs, use_aggressive_mscale=True)
                 else:
                     cos, sin = get_1d_ntk_pos_embed(**common_kwargs, ntk_factor=1.0)
-                
+
                 components.append((cos, sin))
         else:
-            cos_full_spatial, sin_full_spatial = None, None
-            if needs_extrapolation:
-                spatial_axis_dim = self.axes_dim[1]
-                square_pos = torch.arange(0, max_current_patches, device=pos.device).float()
-                max_pe_len = torch.tensor(max_current_patches, dtype=freqs_dtype, device=pos.device)
-                
-                common_kwargs_spatial = {'dim': spatial_axis_dim, 'theta': self.theta, 'use_real': True, 'repeat_interleave_real': True, 'freqs_dtype': freqs_dtype}
-                dype_kwargs = {'dype': self.dype, 'current_timestep': self.current_timestep, 'dype_scale': self.dype_scale, 'dype_exponent': self.dype_exponent}
-
-                cos_full_spatial, sin_full_spatial = get_1d_yarn_pos_embed(
-                    **common_kwargs_spatial, pos=square_pos, max_pe_len=max_pe_len, ori_max_pe_len=self.base_patches, **dype_kwargs, use_aggressive_mscale=False
-                )
-
             for i in range(n_axes):
                 axis_pos = pos[..., i]
                 axis_dim = self.axes_dim[i]
-                
+                current_patches = axis_stats[i]['patch_count']
+
                 if i > 0 and needs_extrapolation:
-                    offset_indices = axis_pos.long() - axis_pos.long().min()
-                    pos_indices = offset_indices.view(-1)
-                    
-                    cos = cos_full_spatial[pos_indices].view(*axis_pos.shape, -1)
-                    sin = sin_full_spatial[pos_indices].view(*axis_pos.shape, -1)
+                    dype_kwargs = {'dype': self.dype, 'current_timestep': self.current_timestep, 'dype_scale': self.dype_scale, 'dype_exponent': self.dype_exponent}
+                    max_pe_len = torch.tensor(current_patches, dtype=freqs_dtype, device=pos.device)
+
+                    cos, sin = get_1d_yarn_pos_embed(
+                        dim=axis_dim, pos=axis_pos, theta=self.theta, max_pe_len=max_pe_len,
+                        ori_max_pe_len=self.base_patches, use_real=True, repeat_interleave_real=True,
+                        freqs_dtype=freqs_dtype, **dype_kwargs, use_aggressive_mscale=False
+                    )
                 else:
                     common_kwargs = {'dim': axis_dim, 'pos': axis_pos, 'theta': self.theta, 'use_real': True, 'repeat_interleave_real': True, 'freqs_dtype': freqs_dtype}
                     cos, sin = get_1d_ntk_pos_embed(**common_kwargs, ntk_factor=1.0)
@@ -184,12 +223,14 @@ class DyPEBasePosEmbed(nn.Module):
         n_axes = pos.shape[-1]
         components = []
 
+        axis_stats = self._analyze_position_grid(pos)
+
         if pos.shape[-1] >= 3:
-            h_span = int(pos[..., 1].max().item() - pos[..., 1].min().item() + 1)
-            w_span = int(pos[..., 2].max().item() - pos[..., 2].min().item() + 1)
+            h_span = axis_stats[1]['patch_count']
+            w_span = axis_stats[2]['patch_count']
             max_patches = max(h_span, w_span)
         else:
-            max_patches = int(pos.max().item() - pos.min().item() + 1)
+            max_patches = axis_stats[0]['patch_count']
 
         unified_scale = max_patches / self.base_patches if max_patches > self.base_patches else 1.0
 
