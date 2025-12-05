@@ -81,12 +81,19 @@ def apply_dype_to_model(model: ModelPatcher, model_type: str, width: int, height
         derived_base_patches = default_base_patches
         derived_base_seq_len = default_base_seq_len
 
+    target_patch_h_tokens = None
+    target_patch_w_tokens = None
+
     if enable_dype and should_patch_schedule:
         try:
             if isinstance(m.model.model_sampling, model_sampling.ModelSamplingFlux) or is_qwen or is_zimage:
                 latent_h, latent_w = height // 8, width // 8
                 padded_h, padded_w = math.ceil(latent_h / patch_size) * patch_size, math.ceil(latent_w / patch_size) * patch_size
                 image_seq_len = (padded_h // patch_size) * (padded_w // patch_size)
+
+                if is_zimage:
+                    target_patch_h_tokens = padded_h // patch_size
+                    target_patch_w_tokens = padded_w // patch_size
 
                 base_seq_len = derived_base_seq_len
                 max_seq_len = image_seq_len
@@ -143,10 +150,12 @@ def apply_dype_to_model(model: ModelPatcher, model_type: str, width: int, height
 
     embedder_base_patches = derived_base_patches if is_zimage else None
     embedder_base_hw_tokens = (base_patch_h_tokens, base_patch_w_tokens) if is_zimage and base_patch_h_tokens and base_patch_w_tokens else None
+    embedder_target_hw_tokens = (target_patch_h_tokens, target_patch_w_tokens) if is_zimage and target_patch_h_tokens and target_patch_w_tokens else None
 
     new_pe_embedder = embedder_cls(
         theta, axes_dim, method, yarn_alt_scaling, enable_dype,
-        dype_scale, dype_exponent, base_resolution, dype_start_sigma, embedder_base_patches, base_hw_tokens=embedder_base_hw_tokens
+        dype_scale, dype_exponent, base_resolution, dype_start_sigma, embedder_base_patches,
+        base_hw_tokens=embedder_base_hw_tokens, target_hw_tokens=embedder_target_hw_tokens
     )
 
     m.add_object_patch(target_patch_path, new_pe_embedder)
