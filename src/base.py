@@ -30,6 +30,37 @@ class DyPEBasePosEmbed(nn.Module):
     def set_timestep(self, timestep: float):
         self.current_timestep = timestep
 
+    def _infer_axis_info(self, axis_pos: torch.Tensor):
+        """
+        Extract start, step, and effective length for an axis that may already be scaled.
+        Pads and caption tokens use zeroed coordinates, so we only look at the
+        populated values.
+        """
+        flat = axis_pos.flatten()
+        valid = flat[torch.isfinite(flat)]
+        if valid.numel() == 0:
+            return 0, 1.0, 0.0
+
+        unique_vals = torch.unique(valid)
+        sorted_vals = torch.sort(unique_vals).values
+
+        start = float(sorted_vals[0].item())
+        if sorted_vals.numel() == 1:
+            return 1, 1.0, start
+
+        diffs = torch.diff(sorted_vals)
+        positive_diffs = diffs[diffs > 0]
+        step = float(torch.min(positive_diffs).item()) if positive_diffs.numel() > 0 else 1.0
+
+        span = float(sorted_vals[-1].item() - start)
+        length = int(math.ceil(span / step)) + 1
+        return length, step, start
+
+    @staticmethod
+    def _effective_tokens(length: int, step: float) -> int:
+        scaled = max(1.0, abs(step))
+        return max(1, int(math.ceil((max(length - 1, 0)) * scaled)) + 1)
+
     def _calc_vision_yarn_components(self, pos: torch.Tensor, freqs_dtype: torch.dtype):
         """
         Calculates raw (cos, sin) pairs using DyPE Vision YaRN (Decoupled + Quadratic Aggressive).
@@ -39,11 +70,12 @@ class DyPEBasePosEmbed(nn.Module):
         components = []
         
         if pos.shape[-1] >= 3:
-            h_span = int(pos[..., 1].max().item() - pos[..., 1].min().item() + 1)
-            w_span = int(pos[..., 2].max().item() - pos[..., 2].min().item() + 1)
-            max_current_patches = max(h_span, w_span)
+            h_len, h_step, _ = self._infer_axis_info(pos[..., 1])
+            w_len, w_step, _ = self._infer_axis_info(pos[..., 2])
+            max_current_patches = max(self._effective_tokens(h_len, h_step), self._effective_tokens(w_len, w_step))
         else:
-            max_current_patches = int(pos.max().item() - pos.min().item() + 1)
+            seq_len, seq_step, _ = self._infer_axis_info(pos)
+            max_current_patches = self._effective_tokens(seq_len, seq_step)
         
         scale_global = max(1.0, max_current_patches / self.base_patches)
             
@@ -65,8 +97,9 @@ class DyPEBasePosEmbed(nn.Module):
 
         for i in range(n_axes):
             axis_pos = pos[..., i]
+            axis_len, axis_step, axis_start = self._infer_axis_info(axis_pos)
             axis_dim = self.axes_dim[i]
-            current_patches = int(axis_pos.max().item() - axis_pos.min().item() + 1)
+            current_patches = self._effective_tokens(axis_len, axis_step)
             
             common_kwargs = {
                 'dim': axis_dim, 
@@ -119,11 +152,12 @@ class DyPEBasePosEmbed(nn.Module):
         components = []
         
         if pos.shape[-1] >= 3:
-            h_span = int(pos[..., 1].max().item() - pos[..., 1].min().item() + 1)
-            w_span = int(pos[..., 2].max().item() - pos[..., 2].min().item() + 1)
-            max_current_patches = max(h_span, w_span)
+            h_len, h_step, _ = self._infer_axis_info(pos[..., 1])
+            w_len, w_step, _ = self._infer_axis_info(pos[..., 2])
+            max_current_patches = max(self._effective_tokens(h_len, h_step), self._effective_tokens(w_len, w_step))
         else:
-            max_current_patches = int(pos.max().item() - pos.min().item() + 1)
+            seq_len, seq_step, _ = self._infer_axis_info(pos)
+            max_current_patches = self._effective_tokens(seq_len, seq_step)
 
         needs_extrapolation = (max_current_patches > self.base_patches)
 
@@ -137,7 +171,8 @@ class DyPEBasePosEmbed(nn.Module):
                 common_kwargs = {'dim': axis_dim, 'pos': axis_pos, 'theta': self.theta, 'use_real': True, 'repeat_interleave_real': True, 'freqs_dtype': freqs_dtype}
                 dype_kwargs = {'dype': self.dype, 'current_timestep': self.current_timestep, 'dype_scale': self.dype_scale, 'dype_exponent': self.dype_exponent}
 
-                current_patches_on_axis = int(axis_pos.max().item() - axis_pos.min().item() + 1)
+                axis_len, axis_step, axis_start = self._infer_axis_info(axis_pos)
+                current_patches_on_axis = self._effective_tokens(axis_len, axis_step)
                 if i > 0 and current_patches_on_axis > self.base_patches:
                     max_pe_len = torch.tensor(current_patches_on_axis, dtype=freqs_dtype, device=pos.device)
                     cos, sin = get_1d_yarn_pos_embed(**common_kwargs, max_pe_len=max_pe_len, ori_max_pe_len=self.base_patches, **dype_kwargs, use_aggressive_mscale=True)
@@ -162,11 +197,11 @@ class DyPEBasePosEmbed(nn.Module):
             for i in range(n_axes):
                 axis_pos = pos[..., i]
                 axis_dim = self.axes_dim[i]
-                
+
                 if i > 0 and needs_extrapolation:
-                    offset_indices = axis_pos.long() - axis_pos.long().min()
-                    pos_indices = offset_indices.view(-1)
-                    
+                    axis_len, axis_step, axis_start = self._infer_axis_info(axis_pos)
+                    pos_indices = torch.round((axis_pos - axis_start) / max(axis_step, 1e-6)).long().view(-1)
+
                     cos = cos_full_spatial[pos_indices].view(*axis_pos.shape, -1)
                     sin = sin_full_spatial[pos_indices].view(*axis_pos.shape, -1)
                 else:
@@ -185,11 +220,12 @@ class DyPEBasePosEmbed(nn.Module):
         components = []
 
         if pos.shape[-1] >= 3:
-            h_span = int(pos[..., 1].max().item() - pos[..., 1].min().item() + 1)
-            w_span = int(pos[..., 2].max().item() - pos[..., 2].min().item() + 1)
-            max_patches = max(h_span, w_span)
+            h_len, h_step, _ = self._infer_axis_info(pos[..., 1])
+            w_len, w_step, _ = self._infer_axis_info(pos[..., 2])
+            max_patches = max(self._effective_tokens(h_len, h_step), self._effective_tokens(w_len, w_step))
         else:
-            max_patches = int(pos.max().item() - pos.min().item() + 1)
+            seq_len, seq_step, _ = self._infer_axis_info(pos)
+            max_patches = self._effective_tokens(seq_len, seq_step)
 
         unified_scale = max_patches / self.base_patches if max_patches > self.base_patches else 1.0
 
