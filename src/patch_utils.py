@@ -61,9 +61,7 @@ def apply_dype_to_model(model: ModelPatcher, model_type: str, width: int, height
     default_base_patches = (base_resolution // 8) // 2
     default_base_seq_len = default_base_patches * default_base_patches
 
-    zimage_step_count = getattr(m.model, "_dype_zimage_step_count", 0)
-    use_dype_patchify = is_zimage and zimage_step_count < 1
-    if use_dype_patchify:
+    if is_zimage:
         axes_lens = getattr(m.model.diffusion_model, "axes_lens", None)
         if isinstance(axes_lens, (list, tuple)) and len(axes_lens) >= 3:
             base_patch_h_tokens = int(axes_lens[1])
@@ -154,7 +152,7 @@ def apply_dype_to_model(model: ModelPatcher, model_type: str, width: int, height
 
     m.add_object_patch(target_patch_path, new_pe_embedder)
 
-    if use_dype_patchify:
+    if is_zimage:
         original_patchify_and_embed = getattr(m.model.diffusion_model, "patchify_and_embed", None)
         if original_patchify_and_embed is not None:
             m.model.diffusion_model._dype_original_patchify_and_embed = original_patchify_and_embed
@@ -263,6 +261,7 @@ def apply_dype_to_model(model: ModelPatcher, model_type: str, width: int, height
     sigma_max = m.model.model_sampling.sigma_max.item()
 
     def dype_wrapper_function(model_function, args_dict):
+        current_sigma = None
         timestep_tensor = args_dict.get("timestep")
         if timestep_tensor is not None and timestep_tensor.numel() > 0:
             current_sigma = timestep_tensor.flatten()[0].item()
@@ -278,7 +277,7 @@ def apply_dype_to_model(model: ModelPatcher, model_type: str, width: int, height
             current_step = getattr(m.model, "_dype_zimage_step_count", 0) + 1
             m.model._dype_zimage_step_count = current_step
 
-            if current_step >= 1:
+            if current_sigma is not None and current_sigma <= dype_start_sigma:
                 original_fn = getattr(m.model.diffusion_model, "_dype_original_patchify_and_embed", None)
                 if original_fn is not None:
                     m.model.diffusion_model.patchify_and_embed = original_fn
