@@ -53,22 +53,24 @@ def apply_dype_to_model(model: ModelPatcher, model_type: str, width: int, height
         if m.model._dype_params == new_dype_params:
             should_patch_schedule = False
 
-    if enable_dype and should_patch_schedule:
-        patch_size = 2 # Default Flux/Qwen
-        try:
-            if is_nunchaku:
-                patch_size = m.model.diffusion_model.model.config.patch_size
-            else:
-                patch_size = m.model.diffusion_model.patch_size
-        except:
-            pass
+    patch_size = 2 # Default Flux/Qwen
+    try:
+        if is_nunchaku:
+            patch_size = m.model.diffusion_model.model.config.patch_size
+        else:
+            patch_size = m.model.diffusion_model.patch_size
+    except:
+        pass
 
+    latent_h, latent_w = height // 8, width // 8
+    padded_h = math.ceil(latent_h / patch_size) * patch_size
+    padded_w = math.ceil(latent_w / patch_size) * patch_size
+
+    if enable_dype and should_patch_schedule:
         try:
             if isinstance(m.model.model_sampling, model_sampling.ModelSamplingFlux) or is_qwen or is_z_image:
-                latent_h, latent_w = height // 8, width // 8
-                padded_h, padded_w = math.ceil(latent_h / patch_size) * patch_size, math.ceil(latent_w / patch_size) * patch_size
                 image_seq_len = (padded_h // patch_size) * (padded_w // patch_size)
-                
+
                 base_patches = (base_resolution // 8) // 2
                 base_seq_len = base_patches * base_patches
                 max_seq_len = image_seq_len
@@ -79,7 +81,7 @@ def apply_dype_to_model(model: ModelPatcher, model_type: str, width: int, height
                     slope = (max_shift - base_shift) / (max_seq_len - base_seq_len)
                     intercept = base_shift - slope * base_seq_len
                     dype_shift = image_seq_len * slope + intercept
-                
+
                 dype_shift = max(0.0, dype_shift)
                 # print(f"[DyPE DEBUG] Calculated dype_shift (mu): {dype_shift:.4f} for resolution {width}x{height} (Base: {base_resolution})")
 
@@ -88,7 +90,7 @@ def apply_dype_to_model(model: ModelPatcher, model_type: str, width: int, height
 
                 new_model_sampler = DypeModelSamplingFlux(m.model.model_config)
                 new_model_sampler.set_parameters(shift=dype_shift)
-                
+
                 m.add_object_patch("model_sampling", new_model_sampler)
                 m.model._dype_params = new_dype_params
         except:
@@ -125,11 +127,23 @@ def apply_dype_to_model(model: ModelPatcher, model_type: str, width: int, height
         embedder_cls = PosEmbedZImage
 
     new_pe_embedder = embedder_cls(
-        theta, axes_dim, method, yarn_alt_scaling, enable_dype, 
+        theta, axes_dim, method, yarn_alt_scaling, enable_dype,
         dype_scale, dype_exponent, base_resolution, dype_start_sigma
     )
-        
+
     m.add_object_patch(target_patch_path, new_pe_embedder)
+
+    if is_z_image:
+        padded_output_h = padded_h * 8
+        padded_output_w = padded_w * 8
+
+        scale_y = base_resolution / padded_output_h
+        scale_x = base_resolution / padded_output_w
+
+        try:
+            m.set_model_rope_options(scale_x, 0.0, scale_y, 0.0, 1.0, 0.0)
+        except Exception:
+            pass
     
     sigma_max = m.model.model_sampling.sigma_max.item()
     
