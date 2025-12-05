@@ -116,6 +116,24 @@ def apply_dype_to_model(model: ModelPatcher, model_type: str, width: int, height
     except AttributeError:
         raise ValueError("The provided model is not a compatible FLUX/Qwen model structure.")
 
+    grid_size_override = None
+    reference_grid_scale = None
+    rope_padding = 0
+
+    if is_z_image:
+        try:
+            rope_padding = int(getattr(orig_embedder, "padding", getattr(orig_embedder, "rope_padding", 0)) or 0)
+        except Exception:
+            rope_padding = 0
+
+        grid_size = getattr(orig_embedder, "grid_size", None)
+        if isinstance(grid_size, (list, tuple)) and len(grid_size) >= 2:
+            grid_size_override = (int(grid_size[0]), int(grid_size[1]))
+
+        max_target_res = max(width, height)
+        if max_target_res > 0:
+            reference_grid_scale = base_resolution / max_target_res
+
     embedder_cls = PosEmbedFlux
     if is_nunchaku:
         embedder_cls = PosEmbedNunchaku
@@ -125,8 +143,11 @@ def apply_dype_to_model(model: ModelPatcher, model_type: str, width: int, height
         embedder_cls = PosEmbedZImage
 
     new_pe_embedder = embedder_cls(
-        theta, axes_dim, method, yarn_alt_scaling, enable_dype, 
-        dype_scale, dype_exponent, base_resolution, dype_start_sigma
+        theta, axes_dim, method, yarn_alt_scaling, enable_dype,
+        dype_scale, dype_exponent, base_resolution, dype_start_sigma,
+        grid_size_override=grid_size_override,
+        reference_grid_scale=reference_grid_scale,
+        rope_padding=rope_padding,
     )
         
     m.add_object_patch(target_patch_path, new_pe_embedder)

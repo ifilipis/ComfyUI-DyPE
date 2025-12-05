@@ -9,7 +9,21 @@ class DyPEBasePosEmbed(nn.Module):
     Handles the calculation of DyPE scaling factors and raw (cos, sin) components.
     Subclasses must implement `forward` to format the output for specific model architectures.
     """
-    def __init__(self, theta: int, axes_dim: list[int], method: str = 'yarn', yarn_alt_scaling: bool = False, dype: bool = True, dype_scale: float = 2.0, dype_exponent: float = 2.0, base_resolution: int = 1024, dype_start_sigma: float = 1.0):
+    def __init__(
+        self,
+        theta: int,
+        axes_dim: list[int],
+        method: str = 'yarn',
+        yarn_alt_scaling: bool = False,
+        dype: bool = True,
+        dype_scale: float = 2.0,
+        dype_exponent: float = 2.0,
+        base_resolution: int = 1024,
+        dype_start_sigma: float = 1.0,
+        grid_size_override: tuple[int, int] | None = None,
+        reference_grid_scale: float | None = None,
+        rope_padding: int = 0,
+    ):
         super().__init__()
         self.theta = theta
         self.axes_dim = axes_dim
@@ -20,7 +34,11 @@ class DyPEBasePosEmbed(nn.Module):
         self.dype_exponent = dype_exponent
         self.base_resolution = base_resolution
         self.dype_start_sigma = max(0.001, min(1.0, dype_start_sigma)) # Clamp 0.001-1.0
-        
+
+        self.grid_size_override = grid_size_override
+        self.reference_grid_scale = reference_grid_scale
+        self.rope_padding = rope_padding
+
         self.current_timestep = 1.0
         
         # Dynamic Base Patches: (Resolution // 8) // 2
@@ -38,15 +56,23 @@ class DyPEBasePosEmbed(nn.Module):
         """
         n_axes = pos.shape[-1]
         components = []
-        
-        if pos.shape[-1] >= 3:
-            h_span = int(pos[..., 1].max().item() - pos[..., 1].min().item() + 1)
-            w_span = int(pos[..., 2].max().item() - pos[..., 2].min().item() + 1)
+
+        pos_for_span = pos - self.rope_padding if self.rope_padding else pos
+
+        if self.grid_size_override and pos.shape[-1] >= 3:
+            h_span, w_span = self.grid_size_override
+            max_current_patches = max(h_span, w_span)
+        elif pos.shape[-1] >= 3:
+            h_span = int(pos_for_span[..., 1].max().item() - pos_for_span[..., 1].min().item() + 1)
+            w_span = int(pos_for_span[..., 2].max().item() - pos_for_span[..., 2].min().item() + 1)
             max_current_patches = max(h_span, w_span)
         else:
-            max_current_patches = int(pos.max().item() - pos.min().item() + 1)
-        
-        scale_global = max(1.0, max_current_patches / self.base_patches)
+            max_current_patches = int(pos_for_span.max().item() - pos_for_span.min().item() + 1)
+
+        if self.reference_grid_scale is not None:
+            scale_global = max(self.reference_grid_scale, 1e-6)
+        else:
+            scale_global = max(1.0, max_current_patches / self.base_patches)
             
         mscale_start = 0.1 * math.log(scale_global) + 1.0
         mscale_end = 1.0
@@ -65,9 +91,9 @@ class DyPEBasePosEmbed(nn.Module):
             axis_pos = pos[..., i]
             axis_dim = self.axes_dim[i]
             current_patches = int(axis_pos.max().item() - axis_pos.min().item() + 1)
-            
+
             common_kwargs = {
-                'dim': axis_dim, 
+                'dim': axis_dim,
                 'pos': axis_pos, 
                 'theta': self.theta, 
                 'use_real': True, 
@@ -85,6 +111,9 @@ class DyPEBasePosEmbed(nn.Module):
             }
 
             if i > 0:
+                if self.grid_size_override and i < len(self.grid_size_override) + 1:
+                    current_patches = self.grid_size_override[i - 1]
+
                 scale_local = max(1.0, current_patches / self.base_patches)
                 dype_kwargs['linear_scale'] = scale_local 
                 
@@ -110,15 +139,25 @@ class DyPEBasePosEmbed(nn.Module):
         """
         n_axes = pos.shape[-1]
         components = []
-        
-        if pos.shape[-1] >= 3:
-            h_span = int(pos[..., 1].max().item() - pos[..., 1].min().item() + 1)
-            w_span = int(pos[..., 2].max().item() - pos[..., 2].min().item() + 1)
+
+        pos_for_span = pos - self.rope_padding if self.rope_padding else pos
+
+        if self.grid_size_override and pos.shape[-1] >= 3:
+            h_span, w_span = self.grid_size_override
+            max_current_patches = max(h_span, w_span)
+        elif pos.shape[-1] >= 3:
+            h_span = int(pos_for_span[..., 1].max().item() - pos_for_span[..., 1].min().item() + 1)
+            w_span = int(pos_for_span[..., 2].max().item() - pos_for_span[..., 2].min().item() + 1)
             max_current_patches = max(h_span, w_span)
         else:
-            max_current_patches = int(pos.max().item() - pos.min().item() + 1)
+            max_current_patches = int(pos_for_span.max().item() - pos_for_span.min().item() + 1)
 
-        needs_extrapolation = (max_current_patches > self.base_patches)
+        if self.reference_grid_scale is not None:
+            scale_global = max(self.reference_grid_scale, 1e-6)
+        else:
+            scale_global = max_current_patches / self.base_patches
+
+        needs_extrapolation = (scale_global > 1.0)
 
         if needs_extrapolation and self.yarn_alt_scaling:
             for i in range(n_axes):
@@ -128,6 +167,8 @@ class DyPEBasePosEmbed(nn.Module):
                 dype_kwargs = {'dype': self.dype, 'current_timestep': self.current_timestep, 'dype_scale': self.dype_scale, 'dype_exponent': self.dype_exponent}
 
                 current_patches_on_axis = int(axis_pos.max().item() - axis_pos.min().item() + 1)
+                if self.grid_size_override and i > 0 and i < len(self.grid_size_override) + 1:
+                    current_patches_on_axis = self.grid_size_override[i - 1]
                 if i > 0 and current_patches_on_axis > self.base_patches:
                     max_pe_len = torch.tensor(current_patches_on_axis, dtype=freqs_dtype, device=pos.device)
                     cos, sin = get_1d_yarn_pos_embed(**common_kwargs, max_pe_len=max_pe_len, ori_max_pe_len=self.base_patches, **dype_kwargs, use_aggressive_mscale=True)
@@ -152,7 +193,7 @@ class DyPEBasePosEmbed(nn.Module):
             for i in range(n_axes):
                 axis_pos = pos[..., i]
                 axis_dim = self.axes_dim[i]
-                
+
                 if i > 0 and needs_extrapolation:
                     offset_indices = axis_pos.long() - axis_pos.long().min()
                     pos_indices = offset_indices.view(-1)
@@ -174,14 +215,22 @@ class DyPEBasePosEmbed(nn.Module):
         n_axes = pos.shape[-1]
         components = []
 
-        if pos.shape[-1] >= 3:
-            h_span = int(pos[..., 1].max().item() - pos[..., 1].min().item() + 1)
-            w_span = int(pos[..., 2].max().item() - pos[..., 2].min().item() + 1)
+        pos_for_span = pos - self.rope_padding if self.rope_padding else pos
+
+        if self.grid_size_override and pos.shape[-1] >= 3:
+            h_span, w_span = self.grid_size_override
+            max_patches = max(h_span, w_span)
+        elif pos.shape[-1] >= 3:
+            h_span = int(pos_for_span[..., 1].max().item() - pos_for_span[..., 1].min().item() + 1)
+            w_span = int(pos_for_span[..., 2].max().item() - pos_for_span[..., 2].min().item() + 1)
             max_patches = max(h_span, w_span)
         else:
-            max_patches = int(pos.max().item() - pos.min().item() + 1)
+            max_patches = int(pos_for_span.max().item() - pos_for_span.min().item() + 1)
 
-        unified_scale = max_patches / self.base_patches if max_patches > self.base_patches else 1.0
+        if self.reference_grid_scale is not None:
+            unified_scale = max(self.reference_grid_scale, 1e-6)
+        else:
+            unified_scale = max_patches / self.base_patches if max_patches > self.base_patches else 1.0
 
         for i in range(n_axes):
             axis_pos = pos[..., i]
