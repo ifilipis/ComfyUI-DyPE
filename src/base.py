@@ -27,8 +27,35 @@ class DyPEBasePosEmbed(nn.Module):
         # Flux/Qwen default: (Resolution // 8) // 2
         self.base_patches = base_patches if base_patches is not None else (self.base_resolution // 8) // 2
 
+        # Optional per-forward metadata to support grid-aware scaling (Z-Image).
+        self._grid_meta = None
+
     def set_timestep(self, timestep: float):
         self.current_timestep = timestep
+
+    def _normalize_for_scaling(self, pos: torch.Tensor):
+        """
+        Hook to normalize positions and expose grid metadata before computing scaling factors.
+        Subclasses can override to supply per-axis scales/offsets.
+        """
+        return pos, self._grid_meta
+
+    def _get_axis_base_patches(self, axis_index: int, grid_meta: dict | None):
+        """
+        Resolve the base patch count for the requested axis. Defaults to `self.base_patches`.
+        """
+        base_hw = None if grid_meta is None else grid_meta.get("base_hw")
+
+        if base_hw is not None and axis_index in (1, 2) and len(base_hw) >= 2:
+            return max(1.0, float(base_hw[axis_index - 1]))
+
+        return max(1.0, float(self.base_patches))
+
+    def _get_global_base_patches(self, grid_meta: dict | None):
+        base_hw = None if grid_meta is None else grid_meta.get("base_hw")
+        if base_hw is not None and len(base_hw) >= 2:
+            return max(1.0, float(max(base_hw)))
+        return max(1.0, float(self.base_patches))
 
     def _calc_vision_yarn_components(self, pos: torch.Tensor, freqs_dtype: torch.dtype):
         """
@@ -37,6 +64,8 @@ class DyPEBasePosEmbed(nn.Module):
         """
         n_axes = pos.shape[-1]
         components = []
+
+        pos, grid_meta = self._normalize_for_scaling(pos)
         
         if pos.shape[-1] >= 3:
             h_span = int(pos[..., 1].max().item() - pos[..., 1].min().item() + 1)
@@ -44,8 +73,8 @@ class DyPEBasePosEmbed(nn.Module):
             max_current_patches = max(h_span, w_span)
         else:
             max_current_patches = int(pos.max().item() - pos.min().item() + 1)
-        
-        scale_global = max(1.0, max_current_patches / self.base_patches)
+
+        scale_global = max(1.0, max_current_patches / self._get_global_base_patches(grid_meta))
             
         mscale_start = 0.1 * math.log(scale_global) + 1.0
         mscale_end = 1.0
@@ -67,6 +96,7 @@ class DyPEBasePosEmbed(nn.Module):
             axis_pos = pos[..., i]
             axis_dim = self.axes_dim[i]
             current_patches = int(axis_pos.max().item() - axis_pos.min().item() + 1)
+            base_patches_on_axis = self._get_axis_base_patches(i, grid_meta)
             
             common_kwargs = {
                 'dim': axis_dim, 
@@ -87,7 +117,7 @@ class DyPEBasePosEmbed(nn.Module):
             }
 
             if i > 0:
-                scale_local = max(1.0, current_patches / self.base_patches)
+                scale_local = max(1.0, current_patches / base_patches_on_axis)
                 
                 # Apply Low Theta protection
                 if force_isotropic:
@@ -98,7 +128,7 @@ class DyPEBasePosEmbed(nn.Module):
                 if scale_global > 1.0:
                     cos, sin = get_1d_dype_yarn_pos_embed(
                         **common_kwargs,
-                        ori_max_pe_len=self.base_patches,
+                        ori_max_pe_len=base_patches_on_axis,
                         **dype_kwargs
                     )
                 else:
@@ -117,6 +147,8 @@ class DyPEBasePosEmbed(nn.Module):
         """
         n_axes = pos.shape[-1]
         components = []
+
+        pos, grid_meta = self._normalize_for_scaling(pos)
         
         if pos.shape[-1] >= 3:
             h_span = int(pos[..., 1].max().item() - pos[..., 1].min().item() + 1)
@@ -125,7 +157,7 @@ class DyPEBasePosEmbed(nn.Module):
         else:
             max_current_patches = int(pos.max().item() - pos.min().item() + 1)
 
-        needs_extrapolation = (max_current_patches > self.base_patches)
+        needs_extrapolation = (max_current_patches > self._get_global_base_patches(grid_meta))
 
         force_isotropic = self.theta < 1000.0
         use_anisotropic = self.yarn_alt_scaling and not force_isotropic
@@ -138,9 +170,10 @@ class DyPEBasePosEmbed(nn.Module):
                 dype_kwargs = {'dype': self.dype, 'current_timestep': self.current_timestep, 'dype_scale': self.dype_scale, 'dype_exponent': self.dype_exponent}
 
                 current_patches_on_axis = int(axis_pos.max().item() - axis_pos.min().item() + 1)
-                if i > 0 and current_patches_on_axis > self.base_patches:
+                base_patches_on_axis = self._get_axis_base_patches(i, grid_meta)
+                if i > 0 and current_patches_on_axis > base_patches_on_axis:
                     max_pe_len = torch.tensor(current_patches_on_axis, dtype=freqs_dtype, device=pos.device)
-                    cos, sin = get_1d_yarn_pos_embed(**common_kwargs, max_pe_len=max_pe_len, ori_max_pe_len=self.base_patches, **dype_kwargs, use_aggressive_mscale=True)
+                    cos, sin = get_1d_yarn_pos_embed(**common_kwargs, max_pe_len=max_pe_len, ori_max_pe_len=base_patches_on_axis, **dype_kwargs, use_aggressive_mscale=True)
                 else:
                     cos, sin = get_1d_ntk_pos_embed(**common_kwargs, ntk_factor=1.0)
                 
@@ -156,7 +189,7 @@ class DyPEBasePosEmbed(nn.Module):
                 dype_kwargs = {'dype': self.dype, 'current_timestep': self.current_timestep, 'dype_scale': self.dype_scale, 'dype_exponent': self.dype_exponent}
 
                 cos_full_spatial, sin_full_spatial = get_1d_yarn_pos_embed(
-                    **common_kwargs_spatial, pos=square_pos, max_pe_len=max_pe_len, ori_max_pe_len=self.base_patches, **dype_kwargs, use_aggressive_mscale=False
+                    **common_kwargs_spatial, pos=square_pos, max_pe_len=max_pe_len, ori_max_pe_len=self._get_global_base_patches(grid_meta), **dype_kwargs, use_aggressive_mscale=False
                 )
 
             for i in range(n_axes):
@@ -184,6 +217,8 @@ class DyPEBasePosEmbed(nn.Module):
         n_axes = pos.shape[-1]
         components = []
 
+        pos, grid_meta = self._normalize_for_scaling(pos)
+
         if pos.shape[-1] >= 3:
             h_span = int(pos[..., 1].max().item() - pos[..., 1].min().item() + 1)
             w_span = int(pos[..., 2].max().item() - pos[..., 2].min().item() + 1)
@@ -191,7 +226,8 @@ class DyPEBasePosEmbed(nn.Module):
         else:
             max_patches = int(pos.max().item() - pos.min().item() + 1)
 
-        unified_scale = max_patches / self.base_patches if max_patches > self.base_patches else 1.0
+        base_for_global = self._get_global_base_patches(grid_meta)
+        unified_scale = max_patches / base_for_global if max_patches > base_for_global else 1.0
 
         for i in range(n_axes):
             axis_pos = pos[..., i]
