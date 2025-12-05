@@ -7,6 +7,11 @@ class PosEmbedZImage(DyPEBasePosEmbed):
 
     Output Format matches `EmbedND`: (B, 1, L, D/2, 2, 2)
     """
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.use_scaled_grid_tokens = True
+
     def forward(self, ids: torch.Tensor) -> torch.Tensor:
         pos = ids.float()
         freqs_dtype = torch.bfloat16 if pos.device.type == 'cuda' else torch.float32
