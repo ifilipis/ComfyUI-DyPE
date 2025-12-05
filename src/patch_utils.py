@@ -140,7 +140,12 @@ def apply_dype_to_model(model: ModelPatcher, model_type: str, width: int, height
     elif is_zimage:
         embedder_cls = PosEmbedZImage
 
-    embedder_base_patches = derived_base_patches if is_zimage else None
+    embedder_base_patches = None
+    if is_zimage:
+        if base_patch_h_tokens is not None and base_patch_w_tokens is not None:
+            embedder_base_patches = (base_patch_h_tokens, base_patch_w_tokens)
+        else:
+            embedder_base_patches = derived_base_patches
 
     new_pe_embedder = embedder_cls(
         theta, axes_dim, method, yarn_alt_scaling, enable_dype,
