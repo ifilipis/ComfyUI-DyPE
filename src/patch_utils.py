@@ -153,10 +153,6 @@ def apply_dype_to_model(model: ModelPatcher, model_type: str, width: int, height
     m.add_object_patch(target_patch_path, new_pe_embedder)
 
     if is_zimage:
-        original_patchify_and_embed = getattr(m.model.diffusion_model, "patchify_and_embed", None)
-        if original_patchify_and_embed is not None:
-            m.model.diffusion_model._dype_original_patchify_and_embed = original_patchify_and_embed
-
         base_hw_override = None
         if base_patch_h_tokens is not None and base_patch_w_tokens is not None:
             base_hw_override = (base_patch_h_tokens, base_patch_w_tokens)
@@ -254,14 +250,9 @@ def apply_dype_to_model(model: ModelPatcher, model_type: str, width: int, height
 
         m.add_object_patch("diffusion_model.patchify_and_embed", types.MethodType(dype_patchify_and_embed, m.model.diffusion_model))
 
-        if original_patchify_and_embed is not None:
-            m.model._dype_zimage_override_active = True
-            m.model._dype_zimage_step_count = 0
-
     sigma_max = m.model.model_sampling.sigma_max.item()
 
     def dype_wrapper_function(model_function, args_dict):
-        current_sigma = None
         timestep_tensor = args_dict.get("timestep")
         if timestep_tensor is not None and timestep_tensor.numel() > 0:
             current_sigma = timestep_tensor.flatten()[0].item()
@@ -271,25 +262,7 @@ def apply_dype_to_model(model: ModelPatcher, model_type: str, width: int, height
                 new_pe_embedder.set_timestep(normalized_timestep)
 
         input_x, c = args_dict.get("input"), args_dict.get("c", {})
-        output = model_function(input_x, args_dict.get("timestep"), **c)
-
-        if getattr(m.model, "_dype_zimage_override_active", False):
-            current_step = getattr(m.model, "_dype_zimage_step_count", 0) + 1
-            m.model._dype_zimage_step_count = current_step
-
-            if current_sigma is not None and current_sigma <= dype_start_sigma:
-                original_fn = getattr(m.model.diffusion_model, "_dype_original_patchify_and_embed", None)
-                if original_fn is not None:
-                    m.model.diffusion_model.patchify_and_embed = original_fn
-
-                if hasattr(m.model.diffusion_model, "_dype_base_hw"):
-                    delattr(m.model.diffusion_model, "_dype_base_hw")
-
-                new_pe_embedder.base_patches = default_base_patches
-
-                m.model._dype_zimage_override_active = False
-
-        return output
+        return model_function(input_x, args_dict.get("timestep"), **c)
 
     m.set_model_unet_function_wrapper(dype_wrapper_function)
 

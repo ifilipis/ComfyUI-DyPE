@@ -27,6 +27,51 @@ class DyPEBasePosEmbed(nn.Module):
         # Flux/Qwen default: (Resolution // 8) // 2
         self.base_patches = base_patches if base_patches is not None else (self.base_resolution // 8) // 2
 
+    def _prepare_axis_positions(self, axis_pos: torch.Tensor):
+        """
+        Normalize and densify Z-image style scaled grids.
+
+        Returns
+        -------
+        axis_pos_eval : torch.Tensor
+            Positions to feed into the embedding math (dense when the grid is scaled).
+        gather_indices : torch.Tensor | None
+            Indices to map dense embeddings back to the sparse/scaled grid shape.
+        effective_len : int
+            Effective patch count for this axis (used for DyPE scaling heuristics).
+        """
+        axis_pos = axis_pos.float()
+
+        unique_vals = torch.unique(axis_pos)
+        unique_count = unique_vals.numel()
+
+        if unique_count <= 1:
+            return axis_pos, None, unique_count
+
+        diffs = torch.diff(torch.sort(unique_vals).values)
+        min_stride = float(diffs.min().item()) if diffs.numel() > 0 else 1.0
+
+        min_pos = axis_pos.min()
+        max_pos = axis_pos.max()
+        scaled_span = float((max_pos - min_pos).item())
+
+        # DyPE grid scaling: keep the scaled span, but densify/extrapolate to unit steps.
+        # When stride > 1, the scaled coordinates have gaps that must be filled so
+        # DyPE/YARN/NTK can reason over the proper resolution.
+        needs_densify = min_stride > 1.0 + 1e-4
+
+        if needs_densify:
+            dense_len = int(round(scaled_span)) + 1
+            dense_positions = torch.linspace(min_pos, max_pos, steps=dense_len, device=axis_pos.device, dtype=axis_pos.dtype)
+            gather_indices = torch.round(axis_pos - min_pos).long()
+            effective_len = dense_len
+            return dense_positions, gather_indices, effective_len
+
+        # Default path: already contiguous in scaled units
+        span_len = int(round(scaled_span)) + 1
+        effective_len = max(span_len, unique_count)
+        return axis_pos, None, effective_len
+
     def set_timestep(self, timestep: float):
         self.current_timestep = timestep
 
@@ -37,14 +82,14 @@ class DyPEBasePosEmbed(nn.Module):
         """
         n_axes = pos.shape[-1]
         components = []
-        
+
         if pos.shape[-1] >= 3:
-            h_span = int(pos[..., 1].max().item() - pos[..., 1].min().item() + 1)
-            w_span = int(pos[..., 2].max().item() - pos[..., 2].min().item() + 1)
-            max_current_patches = max(h_span, w_span)
+            _, _, h_len = self._prepare_axis_positions(pos[..., 1])
+            _, _, w_len = self._prepare_axis_positions(pos[..., 2])
+            max_current_patches = max(h_len, w_len)
         else:
-            max_current_patches = int(pos.max().item() - pos.min().item() + 1)
-        
+            _, _, max_current_patches = self._prepare_axis_positions(pos)
+
         scale_global = max(1.0, max_current_patches / self.base_patches)
             
         mscale_start = 0.1 * math.log(scale_global) + 1.0
@@ -65,15 +110,15 @@ class DyPEBasePosEmbed(nn.Module):
 
         for i in range(n_axes):
             axis_pos = pos[..., i]
+            axis_eval_pos, gather_indices, current_patches = self._prepare_axis_positions(axis_pos)
             axis_dim = self.axes_dim[i]
-            current_patches = int(axis_pos.max().item() - axis_pos.min().item() + 1)
-            
+
             common_kwargs = {
-                'dim': axis_dim, 
-                'pos': axis_pos, 
-                'theta': self.theta, 
-                'use_real': True, 
-                'repeat_interleave_real': True, 
+                'dim': axis_dim,
+                'pos': axis_eval_pos,
+                'theta': self.theta,
+                'use_real': True,
+                'repeat_interleave_real': True,
                 'freqs_dtype': freqs_dtype
             }
             
@@ -106,6 +151,11 @@ class DyPEBasePosEmbed(nn.Module):
             else:
                 cos, sin = get_1d_ntk_pos_embed(**common_kwargs, ntk_factor=1.0)
 
+            if gather_indices is not None:
+                flat_indices = gather_indices.view(-1)
+                cos = cos[flat_indices].view(*axis_pos.shape, -1)
+                sin = sin[flat_indices].view(*axis_pos.shape, -1)
+
             components.append((cos, sin))
             
         return components
@@ -119,11 +169,11 @@ class DyPEBasePosEmbed(nn.Module):
         components = []
         
         if pos.shape[-1] >= 3:
-            h_span = int(pos[..., 1].max().item() - pos[..., 1].min().item() + 1)
-            w_span = int(pos[..., 2].max().item() - pos[..., 2].min().item() + 1)
-            max_current_patches = max(h_span, w_span)
+            _, _, h_len = self._prepare_axis_positions(pos[..., 1])
+            _, _, w_len = self._prepare_axis_positions(pos[..., 2])
+            max_current_patches = max(h_len, w_len)
         else:
-            max_current_patches = int(pos.max().item() - pos.min().item() + 1)
+            _, _, max_current_patches = self._prepare_axis_positions(pos)
 
         needs_extrapolation = (max_current_patches > self.base_patches)
 
@@ -134,16 +184,20 @@ class DyPEBasePosEmbed(nn.Module):
             for i in range(n_axes):
                 axis_pos = pos[..., i]
                 axis_dim = self.axes_dim[i]
-                common_kwargs = {'dim': axis_dim, 'pos': axis_pos, 'theta': self.theta, 'use_real': True, 'repeat_interleave_real': True, 'freqs_dtype': freqs_dtype}
+                axis_eval_pos, gather_indices, current_len = self._prepare_axis_positions(axis_pos)
+                common_kwargs = {'dim': axis_dim, 'pos': axis_eval_pos, 'theta': self.theta, 'use_real': True, 'repeat_interleave_real': True, 'freqs_dtype': freqs_dtype}
                 dype_kwargs = {'dype': self.dype, 'current_timestep': self.current_timestep, 'dype_scale': self.dype_scale, 'dype_exponent': self.dype_exponent}
 
-                current_patches_on_axis = int(axis_pos.max().item() - axis_pos.min().item() + 1)
-                if i > 0 and current_patches_on_axis > self.base_patches:
-                    max_pe_len = torch.tensor(current_patches_on_axis, dtype=freqs_dtype, device=pos.device)
+                if i > 0 and current_len > self.base_patches:
+                    max_pe_len = torch.tensor(current_len, dtype=freqs_dtype, device=pos.device)
                     cos, sin = get_1d_yarn_pos_embed(**common_kwargs, max_pe_len=max_pe_len, ori_max_pe_len=self.base_patches, **dype_kwargs, use_aggressive_mscale=True)
                 else:
                     cos, sin = get_1d_ntk_pos_embed(**common_kwargs, ntk_factor=1.0)
-                
+
+                if gather_indices is not None:
+                    flat_indices = gather_indices.view(-1)
+                    cos = cos[flat_indices].view(*axis_pos.shape, -1)
+                    sin = sin[flat_indices].view(*axis_pos.shape, -1)
                 components.append((cos, sin))
         else:
             cos_full_spatial, sin_full_spatial = None, None
@@ -162,16 +216,25 @@ class DyPEBasePosEmbed(nn.Module):
             for i in range(n_axes):
                 axis_pos = pos[..., i]
                 axis_dim = self.axes_dim[i]
-                
+                axis_eval_pos, gather_indices, _ = self._prepare_axis_positions(axis_pos)
+
                 if i > 0 and needs_extrapolation:
-                    offset_indices = axis_pos.long() - axis_pos.long().min()
-                    pos_indices = offset_indices.view(-1)
-                    
+                    if gather_indices is not None:
+                        pos_indices = gather_indices.view(-1)
+                    else:
+                        offset_indices = axis_pos.long() - axis_pos.long().min()
+                        pos_indices = offset_indices.view(-1)
+
                     cos = cos_full_spatial[pos_indices].view(*axis_pos.shape, -1)
                     sin = sin_full_spatial[pos_indices].view(*axis_pos.shape, -1)
                 else:
-                    common_kwargs = {'dim': axis_dim, 'pos': axis_pos, 'theta': self.theta, 'use_real': True, 'repeat_interleave_real': True, 'freqs_dtype': freqs_dtype}
+                    common_kwargs = {'dim': axis_dim, 'pos': axis_eval_pos, 'theta': self.theta, 'use_real': True, 'repeat_interleave_real': True, 'freqs_dtype': freqs_dtype}
                     cos, sin = get_1d_ntk_pos_embed(**common_kwargs, ntk_factor=1.0)
+
+                    if gather_indices is not None:
+                        flat_indices = gather_indices.view(-1)
+                        cos = cos[flat_indices].view(*axis_pos.shape, -1)
+                        sin = sin[flat_indices].view(*axis_pos.shape, -1)
 
                 components.append((cos, sin))
             
@@ -185,19 +248,20 @@ class DyPEBasePosEmbed(nn.Module):
         components = []
 
         if pos.shape[-1] >= 3:
-            h_span = int(pos[..., 1].max().item() - pos[..., 1].min().item() + 1)
-            w_span = int(pos[..., 2].max().item() - pos[..., 2].min().item() + 1)
-            max_patches = max(h_span, w_span)
+            _, _, h_len = self._prepare_axis_positions(pos[..., 1])
+            _, _, w_len = self._prepare_axis_positions(pos[..., 2])
+            max_patches = max(h_len, w_len)
         else:
-            max_patches = int(pos.max().item() - pos.min().item() + 1)
+            _, _, max_patches = self._prepare_axis_positions(pos)
 
         unified_scale = max_patches / self.base_patches if max_patches > self.base_patches else 1.0
 
         for i in range(n_axes):
             axis_pos = pos[..., i]
+            axis_eval_pos, gather_indices, current_patches = self._prepare_axis_positions(axis_pos)
             axis_dim = self.axes_dim[i]
-            common_kwargs = {'dim': axis_dim, 'pos': axis_pos, 'theta': self.theta, 'use_real': True, 'repeat_interleave_real': True, 'freqs_dtype': freqs_dtype}
-            
+            common_kwargs = {'dim': axis_dim, 'pos': axis_eval_pos, 'theta': self.theta, 'use_real': True, 'repeat_interleave_real': True, 'freqs_dtype': freqs_dtype}
+
             ntk_factor = 1.0
             if i > 0 and unified_scale > 1.0:
                 base_ntk = unified_scale ** (axis_dim / (axis_dim - 2))
@@ -207,8 +271,13 @@ class DyPEBasePosEmbed(nn.Module):
                 else:
                     ntk_factor = base_ntk
                 ntk_factor = max(1.0, ntk_factor)
-            
+
             cos, sin = get_1d_ntk_pos_embed(**common_kwargs, ntk_factor=ntk_factor)
+
+            if gather_indices is not None:
+                flat_indices = gather_indices.view(-1)
+                cos = cos[flat_indices].view(*axis_pos.shape, -1)
+                sin = sin[flat_indices].view(*axis_pos.shape, -1)
             components.append((cos, sin))
             
         return components
