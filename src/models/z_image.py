@@ -1,4 +1,7 @@
+from typing import Optional, Tuple
+
 import torch
+
 from ..base import DyPEBasePosEmbed
 
 class PosEmbedZImage(DyPEBasePosEmbed):
@@ -7,6 +10,12 @@ class PosEmbedZImage(DyPEBasePosEmbed):
 
     Output Format matches `EmbedND`: (B, 1, L, D/2, 2, 2)
     """
+    def __init__(self, *args, base_hw_tokens: Optional[Tuple[int, int]] = None, target_hw_tokens: Optional[Tuple[int, int]] = None, **kwargs):
+        super().__init__(*args, base_hw_tokens=base_hw_tokens, target_hw_tokens=target_hw_tokens, **kwargs)
+        # Fallback to square base if explicit anisotropic grid not provided.
+        if self.base_hw_tokens is None:
+            self.base_hw_tokens = (self.base_patches, self.base_patches)
+
     def forward(self, ids: torch.Tensor) -> torch.Tensor:
         pos = ids.float()
         freqs_dtype = torch.bfloat16 if pos.device.type == 'cuda' else torch.float32
