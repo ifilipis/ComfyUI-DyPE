@@ -53,8 +53,9 @@ def apply_dype_to_model(model: ModelPatcher, model_type: str, width: int, height
         if m.model._dype_params == new_dype_params:
             should_patch_schedule = False
 
+    patch_size = 2 # Default Flux/Qwen
+
     if enable_dype and should_patch_schedule:
-        patch_size = 2 # Default Flux/Qwen
         try:
             if is_nunchaku:
                 patch_size = m.model.diffusion_model.model.config.patch_size
@@ -126,9 +127,9 @@ def apply_dype_to_model(model: ModelPatcher, model_type: str, width: int, height
         except Exception:
             rope_padding = 0
 
-        grid_size = getattr(orig_embedder, "grid_size", None)
-        if isinstance(grid_size, (list, tuple)) and len(grid_size) >= 2:
-            grid_size_override = (int(grid_size[0]), int(grid_size[1]))
+        latent_h, latent_w = height // 8, width // 8
+        padded_h, padded_w = math.ceil(latent_h / patch_size) * patch_size, math.ceil(latent_w / patch_size) * patch_size
+        grid_size_override = (padded_h // patch_size, padded_w // patch_size)
 
         max_target_res = max(width, height)
         if max_target_res > 0:
