@@ -211,13 +211,22 @@ class DyPEBasePosEmbed(nn.Module):
             
         return components
 
-    def get_components(self, pos: torch.Tensor, freqs_dtype: torch.dtype, grid_spans=None):
+    def _resolve_grid_spans(self, pos: torch.Tensor, grid_spans=None, base_pos: torch.Tensor | None = None):
+        if base_pos is not None:
+            return [self._axis_range(base_pos[..., i]) for i in range(base_pos.shape[-1])]
+        if grid_spans is not None:
+            return grid_spans
+        return [self._axis_range(pos[..., i]) for i in range(pos.shape[-1])]
+
+    def get_components(self, pos: torch.Tensor, freqs_dtype: torch.dtype, grid_spans=None, base_pos: torch.Tensor | None = None):
+        spans = self._resolve_grid_spans(pos, grid_spans, base_pos)
+
         if self.method == 'vision_yarn':
-            return self._calc_vision_yarn_components(pos, freqs_dtype, grid_spans)
+            return self._calc_vision_yarn_components(pos, freqs_dtype, spans)
         elif self.method == 'yarn':
-            return self._calc_yarn_components(pos, freqs_dtype, grid_spans)
+            return self._calc_yarn_components(pos, freqs_dtype, spans)
         else: # 'ntk' or 'base'
-            return self._calc_ntk_components(pos, freqs_dtype, grid_spans)
+            return self._calc_ntk_components(pos, freqs_dtype, spans)
             
     def forward(self, ids: torch.Tensor) -> torch.Tensor:
         raise NotImplementedError("Base class does not implement forward. Use a specific model subclass.")

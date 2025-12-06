@@ -25,7 +25,7 @@ class PosEmbedZImage(DyPEBasePosEmbed):
                 w_scale = w_tokens / float(self.base_hw[1])
                 pos[..., 2] = pos[..., 2] * w_scale
         freqs_dtype = torch.bfloat16 if pos.device.type == 'cuda' else torch.float32
-        components = self.get_components(pos, freqs_dtype, grid_spans)
+        components = self.get_components(pos, freqs_dtype, grid_spans, base_pos=pos_full)
 
         emb_parts = []
         for cos, sin in components:
