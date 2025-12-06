@@ -194,33 +194,13 @@ def apply_dype_to_model(model: ModelPatcher, model_type: str, width: int, height
             default_h_scale = 1.0
             default_w_scale = 1.0
 
-            rope_embedder = getattr(self, "rope_embedder", None)
-            dype_blend_factor = None
-            if rope_embedder is not None:
-                dype_start_sigma = getattr(rope_embedder, "dype_start_sigma", None)
-                dype_exponent = getattr(rope_embedder, "dype_exponent", None)
-                current_timestep = getattr(rope_embedder, "current_timestep", None)
-
-                if all(value is not None for value in (dype_start_sigma, dype_exponent, current_timestep)) and dype_start_sigma > 0:
-                    if current_timestep > dype_start_sigma:
-                        t_norm = 1.0
-                    else:
-                        t_norm = current_timestep / dype_start_sigma
-
-                    dype_blend_factor = math.pow(t_norm, dype_exponent)
-
             H_tokens, W_tokens = H // pH, W // pW
             if base_hw is not None and len(base_hw) == 2 and base_hw[0] > 0 and base_hw[1] > 0:
                 default_h_scale = H_tokens / base_hw[0]
                 default_w_scale = W_tokens / base_hw[1]
 
-            def _blend_scale(default_scale: float) -> float:
-                if dype_blend_factor is None:
-                    return default_scale
-                return 1.0 + (default_scale - 1.0) * dype_blend_factor
-
-            h_scale = rope_options.get("scale_y", _blend_scale(default_h_scale)) if rope_options is not None else _blend_scale(default_h_scale)
-            w_scale = rope_options.get("scale_x", _blend_scale(default_w_scale)) if rope_options is not None else _blend_scale(default_w_scale)
+            h_scale = rope_options.get("scale_y", default_h_scale) if rope_options is not None else default_h_scale
+            w_scale = rope_options.get("scale_x", default_w_scale) if rope_options is not None else default_w_scale
 
             h_start = rope_options.get("shift_y", 0.0) if rope_options is not None else 0.0
             w_start = rope_options.get("shift_x", 0.0) if rope_options is not None else 0.0
@@ -254,10 +234,6 @@ def apply_dype_to_model(model: ModelPatcher, model_type: str, width: int, height
 
         m.add_object_patch("diffusion_model.patchify_and_embed", types.MethodType(dype_patchify_and_embed, m.model.diffusion_model))
 
-        if original_patchify_and_embed is not None:
-            m.model._dype_zimage_override_active = True
-            m.model._dype_zimage_step_count = 0
-
     sigma_max = m.model.model_sampling.sigma_max.item()
 
     def dype_wrapper_function(model_function, args_dict):
@@ -272,22 +248,6 @@ def apply_dype_to_model(model: ModelPatcher, model_type: str, width: int, height
 
         input_x, c = args_dict.get("input"), args_dict.get("c", {})
         output = model_function(input_x, args_dict.get("timestep"), **c)
-
-        if getattr(m.model, "_dype_zimage_override_active", False):
-            current_step = getattr(m.model, "_dype_zimage_step_count", 0) + 1
-            m.model._dype_zimage_step_count = current_step
-
-            if current_sigma is not None and current_sigma <= dype_start_sigma:
-                original_fn = getattr(m.model.diffusion_model, "_dype_original_patchify_and_embed", None)
-                if original_fn is not None:
-                    m.model.diffusion_model.patchify_and_embed = original_fn
-
-                if hasattr(m.model.diffusion_model, "_dype_base_hw"):
-                    delattr(m.model.diffusion_model, "_dype_base_hw")
-
-                new_pe_embedder.base_patches = default_base_patches
-
-                m.model._dype_zimage_override_active = False
 
         return output
 
