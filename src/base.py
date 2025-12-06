@@ -115,7 +115,8 @@ class DyPEBasePosEmbed(nn.Module):
                     cos, sin = get_1d_dype_yarn_pos_embed(
                         **common_kwargs,
                         ori_max_pe_len=self.base_patches,
-                        **dype_kwargs
+                        **dype_kwargs,
+                        grid_span=current_patches,
                     )
                 else:
                     cos, sin = get_1d_ntk_pos_embed(**common_kwargs, ntk_factor=1.0)
@@ -164,7 +165,8 @@ class DyPEBasePosEmbed(nn.Module):
                     max_pe_len=target_max_len,
                     ori_max_pe_len=self.base_patches,
                     **dype_kwargs,
-                    use_aggressive_mscale=use_anisotropic
+                    use_aggressive_mscale=use_anisotropic,
+                    grid_span=axis_span
                 )
             else:
                 cos, sin = get_1d_ntk_pos_embed(**common_kwargs, ntk_factor=1.0)

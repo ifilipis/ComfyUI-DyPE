@@ -36,10 +36,15 @@ def get_1d_dype_yarn_pos_embed(
         dype_scale: float,
         dype_exponent: float,
         override_mscale: float = None,
+        grid_span: float | torch.Tensor | None = None,
 ):
     device = pos.device
     linear_scale = max(linear_scale, 1.0)
     ntk_scale = max(ntk_scale, 1.0)
+
+    # Prefer explicit grid spans for scaled grids (e.g., Z-Image) to avoid
+    # relying on integer base lengths when computing correction ranges.
+    max_pe_len = grid_span if grid_span is not None else ori_max_pe_len
 
     beta_0, beta_1 = 1.25, 0.75 
     gamma_0, gamma_1 = 16, 2
@@ -60,12 +65,12 @@ def get_1d_dype_yarn_pos_embed(
     freqs_ntk = 1.0 / torch.pow(new_base, (torch.arange(0, dim, 2, dtype=freqs_dtype, device=device) / dim))
     if freqs_ntk.dim() > 1: freqs_ntk = freqs_ntk.squeeze()
 
-    low, high = find_correction_range(beta_0, beta_1, dim, theta, ori_max_pe_len)
+    low, high = find_correction_range(beta_0, beta_1, dim, theta, max_pe_len)
     low, high = max(0, low), min(dim // 2, high)
     mask_beta = (1 - linear_ramp_mask(low, high, dim // 2).to(device).to(freqs_dtype))
     freqs = freqs_linear * (1 - mask_beta) + freqs_ntk * mask_beta
 
-    low, high = find_correction_range(gamma_0, gamma_1, dim, theta, ori_max_pe_len)
+    low, high = find_correction_range(gamma_0, gamma_1, dim, theta, max_pe_len)
     low, high = max(0, low), min(dim // 2, high)
     mask_gamma = (1 - linear_ramp_mask(low, high, dim // 2).to(device).to(freqs_dtype))
     freqs = freqs * (1 - mask_gamma) + freqs_base * mask_gamma
@@ -103,9 +108,15 @@ def get_1d_yarn_pos_embed(
         dype_scale: float,
         dype_exponent: float,
         use_aggressive_mscale: bool = False,
+        grid_span: float | torch.Tensor | None = None,
 ):
     device = pos.device
-    scale = torch.clamp_min(max_pe_len / ori_max_pe_len, 1.0)
+    max_len = torch.as_tensor(
+        grid_span if grid_span is not None else ori_max_pe_len,
+        dtype=freqs_dtype,
+        device=pos.device,
+    )
+    scale = torch.clamp_min(max_pe_len / max_len, 1.0)
 
     beta_0, beta_1 = 1.25, 0.75
     gamma_0, gamma_1 = 16, 2
@@ -123,7 +134,7 @@ def get_1d_yarn_pos_embed(
         beta_0 = beta_0 ** k_t
         beta_1 = beta_1 ** k_t
 
-    low, high = find_correction_range(beta_0, beta_1, dim, theta, ori_max_pe_len)
+    low, high = find_correction_range(beta_0, beta_1, dim, theta, max_len)
     low, high = max(0, low), min(dim // 2, high)
     freqs_mask = (1 - linear_ramp_mask(low, high, dim // 2).to(device).to(freqs_dtype))
     freqs = freqs_linear * (1 - freqs_mask) + freqs_ntk * freqs_mask
@@ -133,7 +144,7 @@ def get_1d_yarn_pos_embed(
         gamma_0 = gamma_0 ** k_t
         gamma_1 = gamma_1 ** k_t
 
-    low, high = find_correction_range(gamma_0, gamma_1, dim, theta, ori_max_pe_len)
+    low, high = find_correction_range(gamma_0, gamma_1, dim, theta, max_len)
     low, high = max(0, low), min(dim // 2, high)
     freqs_mask = (1 - linear_ramp_mask(low, high, dim // 2).to(device).to(freqs_dtype))
     freqs = freqs * (1 - freqs_mask) + freqs_base * freqs_mask
