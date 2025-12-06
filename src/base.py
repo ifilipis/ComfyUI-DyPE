@@ -42,16 +42,30 @@ class DyPEBasePosEmbed(nn.Module):
         """
         n_axes = pos.shape[-1]
         components = []
-        
+
+        def _estimate_patch_count(axis_pos: torch.Tensor) -> float:
+            flat = axis_pos.flatten()
+            unique_vals = torch.unique(flat)
+            if unique_vals.numel() <= 1:
+                return 1.0
+
+            sorted_vals, _ = torch.sort(unique_vals)
+            diffs = torch.diff(sorted_vals)
+            positive_diffs = diffs[diffs > 0]
+            min_step = positive_diffs.min().item() if positive_diffs.numel() > 0 else 1.0
+
+            span = (sorted_vals.max() - sorted_vals.min()).item()
+            return span / max(min_step, 1e-6) + 1.0
+
         if pos.shape[-1] >= 3:
-            h_span = int(pos[..., 1].max().item() - pos[..., 1].min().item() + 1)
-            w_span = int(pos[..., 2].max().item() - pos[..., 2].min().item() + 1)
-            max_current_patches = max(h_span, w_span)
+            h_patches = _estimate_patch_count(pos[..., 1])
+            w_patches = _estimate_patch_count(pos[..., 2])
+            max_current_patches = max(h_patches, w_patches)
         else:
-            max_current_patches = int(pos.max().item() - pos.min().item() + 1)
-        
-        scale_global = max(1.0, max_current_patches / self.base_patches)
-            
+            max_current_patches = _estimate_patch_count(pos)
+
+        scale_global = max(1.0, max_current_patches / float(self.base_patches))
+
         mscale_start = 0.1 * math.log(scale_global) + 1.0
         mscale_end = 1.0
         
@@ -71,10 +85,10 @@ class DyPEBasePosEmbed(nn.Module):
         for i in range(n_axes):
             axis_pos = pos[..., i]
             axis_dim = self.axes_dim[i]
-            current_patches = int(axis_pos.max().item() - axis_pos.min().item() + 1)
-            
+            current_patches = _estimate_patch_count(axis_pos)
+
             common_kwargs = {
-                'dim': axis_dim, 
+                'dim': axis_dim,
                 'pos': axis_pos, 
                 'theta': self.theta, 
                 'use_real': True, 
@@ -92,7 +106,7 @@ class DyPEBasePosEmbed(nn.Module):
             }
 
             if i > 0:
-                scale_local = max(1.0, current_patches / self.base_patches)
+                scale_local = max(1.0, current_patches / float(self.base_patches))
                 
                 # Apply Low Theta protection
                 if force_isotropic:
@@ -123,12 +137,26 @@ class DyPEBasePosEmbed(nn.Module):
         n_axes = pos.shape[-1]
         components = []
         
+        def _estimate_patch_count(axis_pos: torch.Tensor) -> float:
+            flat = axis_pos.flatten()
+            unique_vals = torch.unique(flat)
+            if unique_vals.numel() <= 1:
+                return 1.0
+
+            sorted_vals, _ = torch.sort(unique_vals)
+            diffs = torch.diff(sorted_vals)
+            positive_diffs = diffs[diffs > 0]
+            min_step = positive_diffs.min().item() if positive_diffs.numel() > 0 else 1.0
+
+            span = (sorted_vals.max() - sorted_vals.min()).item()
+            return span / max(min_step, 1e-6) + 1.0
+
         if pos.shape[-1] >= 3:
-            h_span = int(pos[..., 1].max().item() - pos[..., 1].min().item() + 1)
-            w_span = int(pos[..., 2].max().item() - pos[..., 2].min().item() + 1)
-            max_current_patches = max(h_span, w_span)
+            h_patches = _estimate_patch_count(pos[..., 1])
+            w_patches = _estimate_patch_count(pos[..., 2])
+            max_current_patches = max(h_patches, w_patches)
         else:
-            max_current_patches = int(pos.max().item() - pos.min().item() + 1)
+            max_current_patches = _estimate_patch_count(pos)
 
         needs_extrapolation = (max_current_patches > self.base_patches)
 
@@ -142,7 +170,7 @@ class DyPEBasePosEmbed(nn.Module):
                 common_kwargs = {'dim': axis_dim, 'pos': axis_pos, 'theta': self.theta, 'use_real': True, 'repeat_interleave_real': True, 'freqs_dtype': freqs_dtype}
                 dype_kwargs = {'dype': self.dype, 'current_timestep': self.current_timestep, 'dype_scale': self.dype_scale, 'dype_exponent': self.dype_exponent}
 
-                current_patches_on_axis = int(axis_pos.max().item() - axis_pos.min().item() + 1)
+                current_patches_on_axis = _estimate_patch_count(axis_pos)
                 if i > 0 and current_patches_on_axis > self.base_patches:
                     max_pe_len = torch.tensor(current_patches_on_axis, dtype=freqs_dtype, device=pos.device)
                     cos, sin = get_1d_yarn_pos_embed(**common_kwargs, max_pe_len=max_pe_len, ori_max_pe_len=self.base_patches, **dype_kwargs, use_aggressive_mscale=True)
@@ -154,7 +182,7 @@ class DyPEBasePosEmbed(nn.Module):
             cos_full_spatial, sin_full_spatial = None, None
             if needs_extrapolation:
                 spatial_axis_dim = self.axes_dim[1]
-                square_pos = torch.arange(0, max_current_patches, device=pos.device).float()
+                square_pos = torch.arange(0, math.ceil(max_current_patches), device=pos.device).float()
                 max_pe_len = torch.tensor(max_current_patches, dtype=freqs_dtype, device=pos.device)
                 
                 common_kwargs_spatial = {'dim': spatial_axis_dim, 'theta': self.theta, 'use_real': True, 'repeat_interleave_real': True, 'freqs_dtype': freqs_dtype}
@@ -167,10 +195,18 @@ class DyPEBasePosEmbed(nn.Module):
             for i in range(n_axes):
                 axis_pos = pos[..., i]
                 axis_dim = self.axes_dim[i]
-                
+
                 if i > 0 and needs_extrapolation:
-                    offset_indices = axis_pos.long() - axis_pos.long().min()
-                    pos_indices = offset_indices.view(-1)
+                    unique_vals = torch.unique(axis_pos.flatten())
+                    if unique_vals.numel() > 1:
+                        sorted_vals, _ = torch.sort(unique_vals)
+                        diffs = torch.diff(sorted_vals)
+                        min_step = torch.clamp_min(diffs[diffs > 0].min(), 1e-6) if diffs.numel() > 0 else torch.tensor(1.0, device=axis_pos.device, dtype=axis_pos.dtype)
+                    else:
+                        min_step = torch.tensor(1.0, device=axis_pos.device, dtype=axis_pos.dtype)
+
+                    offset_indices = (axis_pos - axis_pos.min()).div(min_step, rounding_mode='floor')
+                    pos_indices = offset_indices.view(-1).long()
                     
                     cos = cos_full_spatial[pos_indices].view(*axis_pos.shape, -1)
                     sin = sin_full_spatial[pos_indices].view(*axis_pos.shape, -1)
@@ -189,14 +225,28 @@ class DyPEBasePosEmbed(nn.Module):
         n_axes = pos.shape[-1]
         components = []
 
-        if pos.shape[-1] >= 3:
-            h_span = int(pos[..., 1].max().item() - pos[..., 1].min().item() + 1)
-            w_span = int(pos[..., 2].max().item() - pos[..., 2].min().item() + 1)
-            max_patches = max(h_span, w_span)
-        else:
-            max_patches = int(pos.max().item() - pos.min().item() + 1)
+        def _estimate_patch_count(axis_pos: torch.Tensor) -> float:
+            flat = axis_pos.flatten()
+            unique_vals = torch.unique(flat)
+            if unique_vals.numel() <= 1:
+                return 1.0
 
-        unified_scale = max_patches / self.base_patches if max_patches > self.base_patches else 1.0
+            sorted_vals, _ = torch.sort(unique_vals)
+            diffs = torch.diff(sorted_vals)
+            positive_diffs = diffs[diffs > 0]
+            min_step = positive_diffs.min().item() if positive_diffs.numel() > 0 else 1.0
+
+            span = (sorted_vals.max() - sorted_vals.min()).item()
+            return span / max(min_step, 1e-6) + 1.0
+
+        if pos.shape[-1] >= 3:
+            h_patches = _estimate_patch_count(pos[..., 1])
+            w_patches = _estimate_patch_count(pos[..., 2])
+            max_patches = max(h_patches, w_patches)
+        else:
+            max_patches = _estimate_patch_count(pos)
+
+        unified_scale = max_patches / float(self.base_patches) if max_patches > self.base_patches else 1.0
 
         for i in range(n_axes):
             axis_pos = pos[..., i]
