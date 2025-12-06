@@ -46,20 +46,20 @@ class DyPEBasePosEmbed(nn.Module):
     def set_timestep(self, timestep: float):
         self.current_timestep = timestep
 
-    def _calc_vision_yarn_components(self, pos: torch.Tensor, freqs_dtype: torch.dtype):
+    def _calc_vision_yarn_components(self, pos: torch.Tensor, freqs_dtype: torch.dtype, grid_spans=None):
         """
         Calculates raw (cos, sin) pairs using DyPE Vision YaRN (Decoupled + Quadratic Aggressive).
         Returns a list of (cos, sin) tuples per axis.
         """
         n_axes = pos.shape[-1]
         components = []
-        
-        if pos.shape[-1] >= 3:
-            h_span = self._axis_range(pos[..., 1])
-            w_span = self._axis_range(pos[..., 2])
-            max_current_patches = max(h_span, w_span)
+
+        spans = grid_spans if grid_spans is not None else [self._axis_range(pos[..., i]) for i in range(n_axes)]
+
+        if pos.shape[-1] >= 3 and len(spans) >= 3:
+            max_current_patches = max(spans[1], spans[2])
         else:
-            max_current_patches = self._axis_range(pos)
+            max_current_patches = spans[0] if len(spans) > 0 else 0.0
         
         scale_global = max(1.0, max_current_patches / self.base_patches)
             
@@ -82,7 +82,7 @@ class DyPEBasePosEmbed(nn.Module):
         for i in range(n_axes):
             axis_pos = pos[..., i]
             axis_dim = self.axes_dim[i]
-            current_patches = self._axis_range(axis_pos)
+            current_patches = spans[i] if i < len(spans) else self._axis_range(axis_pos)
             
             common_kwargs = {
                 'dim': axis_dim, 
@@ -109,7 +109,7 @@ class DyPEBasePosEmbed(nn.Module):
                 if force_isotropic:
                     dype_kwargs['linear_scale'] = 1.0
                 else:
-                    dype_kwargs['linear_scale'] = scale_local 
+                    dype_kwargs['linear_scale'] = scale_local
                 
                 if scale_global > 1.0:
                     cos, sin = get_1d_dype_yarn_pos_embed(
@@ -126,7 +126,7 @@ class DyPEBasePosEmbed(nn.Module):
             
         return components
 
-    def _calc_yarn_components(self, pos: torch.Tensor, freqs_dtype: torch.dtype):
+    def _calc_yarn_components(self, pos: torch.Tensor, freqs_dtype: torch.dtype, grid_spans=None):
         """
         Legacy Method: Standard YaRN
         Returns a list of (cos, sin) tuples per axis.
@@ -134,12 +134,12 @@ class DyPEBasePosEmbed(nn.Module):
         n_axes = pos.shape[-1]
         components = []
 
-        if pos.shape[-1] >= 3:
-            h_span = self._axis_range(pos[..., 1])
-            w_span = self._axis_range(pos[..., 2])
-            max_current_patches = max(h_span, w_span)
+        spans = grid_spans if grid_spans is not None else [self._axis_range(pos[..., i]) for i in range(n_axes)]
+
+        if pos.shape[-1] >= 3 and len(spans) >= 3:
+            max_current_patches = max(spans[1], spans[2])
         else:
-            max_current_patches = self._axis_range(pos)
+            max_current_patches = spans[0] if len(spans) > 0 else 0.0
 
         needs_extrapolation = (max_current_patches > self.base_patches)
 
@@ -156,7 +156,7 @@ class DyPEBasePosEmbed(nn.Module):
             dype_kwargs = {'dype': self.dype, 'current_timestep': self.current_timestep, 'dype_scale': self.dype_scale, 'dype_exponent': self.dype_exponent}
 
             if i > 0 and needs_extrapolation:
-                axis_span = self._axis_range(axis_pos)
+                axis_span = spans[i] if i < len(spans) else self._axis_range(axis_pos)
                 axis_max_len = torch.tensor(axis_span if axis_span > 0 else 1.0, dtype=freqs_dtype, device=pos.device)
                 target_max_len = axis_max_len if use_anisotropic else max_pe_len_global
                 cos, sin = get_1d_yarn_pos_embed(
@@ -173,19 +173,19 @@ class DyPEBasePosEmbed(nn.Module):
 
         return components
 
-    def _calc_ntk_components(self, pos: torch.Tensor, freqs_dtype: torch.dtype):
+    def _calc_ntk_components(self, pos: torch.Tensor, freqs_dtype: torch.dtype, grid_spans=None):
         """
         Returns a list of (cos, sin) tuples per axis using NTK.
         """
         n_axes = pos.shape[-1]
         components = []
 
-        if pos.shape[-1] >= 3:
-            h_span = self._axis_range(pos[..., 1])
-            w_span = self._axis_range(pos[..., 2])
-            max_patches = max(h_span, w_span)
+        spans = grid_spans if grid_spans is not None else [self._axis_range(pos[..., i]) for i in range(n_axes)]
+
+        if pos.shape[-1] >= 3 and len(spans) >= 3:
+            max_patches = max(spans[1], spans[2])
         else:
-            max_patches = self._axis_range(pos)
+            max_patches = spans[0] if len(spans) > 0 else 0.0
 
         unified_scale = max_patches / self.base_patches if max_patches > self.base_patches else 1.0
 
@@ -193,7 +193,7 @@ class DyPEBasePosEmbed(nn.Module):
             axis_pos = pos[..., i]
             axis_dim = self.axes_dim[i]
             common_kwargs = {'dim': axis_dim, 'pos': axis_pos, 'theta': self.theta, 'use_real': True, 'repeat_interleave_real': True, 'freqs_dtype': freqs_dtype}
-            
+
             ntk_factor = 1.0
             if i > 0 and unified_scale > 1.0:
                 base_ntk = unified_scale ** (axis_dim / (axis_dim - 2))
@@ -209,13 +209,13 @@ class DyPEBasePosEmbed(nn.Module):
             
         return components
 
-    def get_components(self, pos: torch.Tensor, freqs_dtype: torch.dtype):
+    def get_components(self, pos: torch.Tensor, freqs_dtype: torch.dtype, grid_spans=None):
         if self.method == 'vision_yarn':
-            return self._calc_vision_yarn_components(pos, freqs_dtype)
+            return self._calc_vision_yarn_components(pos, freqs_dtype, grid_spans)
         elif self.method == 'yarn':
-            return self._calc_yarn_components(pos, freqs_dtype)
+            return self._calc_yarn_components(pos, freqs_dtype, grid_spans)
         else: # 'ntk' or 'base'
-            return self._calc_ntk_components(pos, freqs_dtype)
+            return self._calc_ntk_components(pos, freqs_dtype, grid_spans)
             
     def forward(self, ids: torch.Tensor) -> torch.Tensor:
         raise NotImplementedError("Base class does not implement forward. Use a specific model subclass.")
