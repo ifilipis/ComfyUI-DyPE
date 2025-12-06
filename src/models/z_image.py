@@ -9,6 +9,18 @@ class PosEmbedZImage(DyPEBasePosEmbed):
     """
     def forward(self, ids: torch.Tensor) -> torch.Tensor:
         pos = ids.float()
+        if self.base_hw is not None and pos.shape[-1] >= 3:
+            pos = pos.clone()
+            h_tokens = self._axis_range(pos[..., 1])
+            w_tokens = self._axis_range(pos[..., 2])
+
+            if self.base_hw[0] > 0:
+                h_scale = h_tokens / float(self.base_hw[0])
+                pos[..., 1] = pos[..., 1] * h_scale
+
+            if self.base_hw[1] > 0:
+                w_scale = w_tokens / float(self.base_hw[1])
+                pos[..., 2] = pos[..., 2] * w_scale
         freqs_dtype = torch.bfloat16 if pos.device.type == 'cuda' else torch.float32
 
         components = self.get_components(pos, freqs_dtype)
