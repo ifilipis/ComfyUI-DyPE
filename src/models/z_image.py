@@ -8,10 +8,12 @@ class PosEmbedZImage(DyPEBasePosEmbed):
     Output Format matches `EmbedND`: (B, 1, L, D/2, 2, 2)
     """
     def forward(self, ids: torch.Tensor) -> torch.Tensor:
-        pos = ids.float()
-        freqs_dtype = torch.bfloat16 if pos.device.type == 'cuda' else torch.float32
+        pos_full = ids.float()
+        grid_spans = [self._axis_range(pos_full[..., i]) for i in range(pos_full.shape[-1])]
 
-        components = self.get_components(pos, freqs_dtype)
+        pos = pos_full
+        freqs_dtype = torch.bfloat16 if pos.device.type == 'cuda' else torch.float32
+        components = self.get_components(pos, freqs_dtype, grid_spans, base_pos=pos_full)
 
         emb_parts = []
         for cos, sin in components:
