@@ -8,10 +8,31 @@ class PosEmbedZImage(DyPEBasePosEmbed):
     Output Format matches `EmbedND`: (B, 1, L, D/2, 2, 2)
     """
     def forward(self, ids: torch.Tensor) -> torch.Tensor:
-        pos = ids.float()
-        freqs_dtype = torch.bfloat16 if pos.device.type == 'cuda' else torch.float32
+        pos_full = ids.float()
+        pos = pos_full.clone()
 
-        components = self.get_components(pos, freqs_dtype)
+        grid_spans = []
+        for axis in range(pos.shape[-1]):
+            axis_vals = pos[..., axis]
+
+            if axis == 0:
+                grid_spans.append(self._axis_range(axis_vals))
+                continue
+
+            unique_vals = torch.unique(axis_vals)
+            if unique_vals.numel() > 1:
+                diffs = unique_vals[1:] - unique_vals[:-1]
+                positive_diffs = diffs[diffs > 0]
+                stride = positive_diffs.min() if positive_diffs.numel() > 0 else torch.tensor(1.0, device=axis_vals.device, dtype=axis_vals.dtype)
+            else:
+                stride = torch.tensor(1.0, device=axis_vals.device, dtype=axis_vals.dtype)
+
+            axis_min = unique_vals.min()
+            pos[..., axis] = (axis_vals - axis_min) / stride
+            grid_spans.append(self._axis_range(pos[..., axis]))
+
+        freqs_dtype = torch.bfloat16 if pos.device.type == 'cuda' else torch.float32
+        components = self.get_components(pos, freqs_dtype, grid_spans)
 
         emb_parts = []
         for cos, sin in components:
