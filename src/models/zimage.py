@@ -68,6 +68,7 @@ class PosEmbedZImage(DyPEBasePosEmbed):
 
         scale_global = self.external_scale_hint
         apply_grid_scaling_only = (self.current_timestep <= self.dype_start_sigma)
+        blend_manual = self._blend_to_full_scale()
 
         if scale_global > 1.0 and self.dype:
             mscale_start = 0.05 * math.log(scale_global) + 1.0
@@ -98,7 +99,8 @@ class PosEmbedZImage(DyPEBasePosEmbed):
                 else:
                     grid_scale = 1.0
 
-                scaled_pos = axis_pos * grid_scale
+                scale_factor = 1.0 + (grid_scale - 1.0) * blend_manual
+                scaled_pos = axis_pos * scale_factor
                 freqs = 1.0 / (self.theta ** (torch.arange(0, axis_dim, 2, dtype=freqs_dtype, device=axis_pos.device) / axis_dim))
                 freqs = torch.einsum("...s,d->...sd", scaled_pos, freqs)
                 cos = freqs.cos().repeat_interleave(2, dim=-1).float()
