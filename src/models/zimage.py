@@ -91,7 +91,18 @@ class PosEmbedZImage(DyPEBasePosEmbed):
 
             is_spatial = (i > 0)
 
-            if is_spatial and scale_global > 1.0 and not apply_grid_scaling_only:
+            if is_spatial and apply_grid_scaling_only and scale_global > 0:
+                grid_idx = i - 1
+                base_axis_len = self.base_patch_grid[grid_idx] if grid_idx < len(self.base_patch_grid) else self.base_patches
+                output_axis_len = base_axis_len * scale_global
+                if output_axis_len > 0:
+                    grid_scale = base_axis_len / output_axis_len
+                else:
+                    grid_scale = 1.0
+
+                cos, sin = get_1d_ntk_pos_embed(**common_kwargs, ntk_factor=grid_scale)
+
+            elif is_spatial and scale_global > 1.0 and not apply_grid_scaling_only:
                 grid_idx = i - 1
                 base_axis_len = self.base_patch_grid[grid_idx] if grid_idx < len(self.base_patch_grid) else self.base_patches
 
