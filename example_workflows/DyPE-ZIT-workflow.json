@@ -1,35 +1,9 @@
 {
   "id": "9ae6082b-c7f4-433c-9971-7a8f65a3ea65",
   "revision": 0,
-  "last_node_id": 49,
-  "last_link_id": 47,
+  "last_node_id": 52,
+  "last_link_id": 49,
   "nodes": [
-    {
-      "id": 35,
-      "type": "MarkdownNote",
-      "pos": [
-        -390,
-        270
-      ],
-      "size": [
-        490,
-        400
-      ],
-      "flags": {
-        "collapsed": false
-      },
-      "order": 0,
-      "mode": 0,
-      "inputs": [],
-      "outputs": [],
-      "title": "Model link",
-      "properties": {},
-      "widgets_values": [
-        "## Report issue\n\nIf you found any issues when running this workflow, [report template issue here](https://github.com/Comfy-Org/workflow_templates/issues)\n\n\n## Model links\n\n**text_encoders**\n\n- [qwen_3_4b.safetensors](https://huggingface.co/Comfy-Org/z_image_turbo/resolve/main/split_files/text_encoders/qwen_3_4b.safetensors)\n\n**diffusion_models**\n\n- [z_image_turbo_bf16.safetensors](https://huggingface.co/Comfy-Org/z_image_turbo/resolve/main/split_files/diffusion_models/z_image_turbo_bf16.safetensors)\n\n**vae**\n\n- [ae.safetensors](https://huggingface.co/Comfy-Org/z_image_turbo/resolve/main/split_files/vae/ae.safetensors)\n\n\nModel Storage Location\n\n```\n📂 ComfyUI/\n├── 📂 models/\n│   ├── 📂 text_encoders/\n│   │      └── qwen_3_4b.safetensors\n│   ├── 📂 diffusion_models/\n│   │      └── z_image_turbo_bf16.safetensors\n│   └── 📂 vae/\n│          └── ae.safetensors\n```\n\n"
-      ],
-      "color": "#432",
-      "bgcolor": "#653"
-    },
     {
       "id": 44,
       "type": "KSampler",
@@ -42,7 +16,7 @@
         474
       ],
       "flags": {},
-      "order": 10,
+      "order": 12,
       "mode": 0,
       "inputs": [
         {
@@ -99,54 +73,6 @@
       ]
     },
     {
-      "id": 46,
-      "type": "UNETLoader",
-      "pos": [
-        130.2638101844517,
-        305.2545050421948
-      ],
-      "size": [
-        270,
-        82
-      ],
-      "flags": {},
-      "order": 1,
-      "mode": 0,
-      "inputs": [],
-      "outputs": [
-        {
-          "name": "MODEL",
-          "type": "MODEL",
-          "links": [
-            46
-          ]
-        }
-      ],
-      "properties": {
-        "cnr_id": "comfy-core",
-        "ver": "0.3.73",
-        "Node name for S&R": "UNETLoader",
-        "models": [
-          {
-            "name": "z_image_turbo_bf16.safetensors",
-            "url": "https://huggingface.co/Comfy-Org/z_image_turbo/resolve/main/split_files/diffusion_models/z_image_turbo_bf16.safetensors",
-            "directory": "diffusion_models"
-          }
-        ],
-        "enableTabs": false,
-        "tabWidth": 65,
-        "tabXOffset": 10,
-        "hasSecondTab": false,
-        "secondTabText": "Send Back",
-        "secondTabOffset": 80,
-        "secondTabWidth": 65
-      },
-      "widgets_values": [
-        "z_image_turbo_bf16.safetensors",
-        "default"
-      ]
-    },
-    {
       "id": 39,
       "type": "CLIPLoader",
       "pos": [
@@ -158,7 +84,7 @@
         106
       ],
       "flags": {},
-      "order": 2,
+      "order": 0,
       "mode": 0,
       "inputs": [],
       "outputs": [
@@ -207,7 +133,7 @@
         58
       ],
       "flags": {},
-      "order": 3,
+      "order": 1,
       "mode": 0,
       "inputs": [],
       "outputs": [
@@ -254,7 +180,7 @@
         590.9817412927072
       ],
       "flags": {},
-      "order": 12,
+      "order": 14,
       "mode": 0,
       "inputs": [
         {
@@ -292,7 +218,7 @@
         110
       ],
       "flags": {},
-      "order": 4,
+      "order": 2,
       "mode": 0,
       "inputs": [],
       "outputs": [
@@ -335,7 +261,7 @@
         60
       ],
       "flags": {},
-      "order": 8,
+      "order": 11,
       "mode": 0,
       "inputs": [
         {
@@ -464,18 +390,174 @@
       "widgets_values": []
     },
     {
+      "id": 46,
+      "type": "UNETLoader",
+      "pos": [
+        130.2638101844517,
+        305.2545050421948
+      ],
+      "size": [
+        270,
+        82
+      ],
+      "flags": {},
+      "order": 3,
+      "mode": 0,
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "MODEL",
+          "type": "MODEL",
+          "links": [
+            48
+          ]
+        }
+      ],
+      "properties": {
+        "cnr_id": "comfy-core",
+        "ver": "0.3.73",
+        "Node name for S&R": "UNETLoader",
+        "models": [
+          {
+            "name": "z_image_turbo_bf16.safetensors",
+            "url": "https://huggingface.co/Comfy-Org/z_image_turbo/resolve/main/split_files/diffusion_models/z_image_turbo_bf16.safetensors",
+            "directory": "diffusion_models"
+          }
+        ],
+        "enableTabs": false,
+        "tabWidth": 65,
+        "tabXOffset": 10,
+        "hasSecondTab": false,
+        "secondTabText": "Send Back",
+        "secondTabOffset": 80,
+        "secondTabWidth": 65
+      },
+      "widgets_values": [
+        "z_image_turbo_bf16.safetensors",
+        "default"
+      ]
+    },
+    {
+      "id": 48,
+      "type": "DyPE_FLUX",
+      "pos": [
+        487.4055670233965,
+        706.7051732742663
+      ],
+      "size": [
+        342.5881686404282,
+        326.75987991084776
+      ],
+      "flags": {},
+      "order": 10,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "model",
+          "type": "MODEL",
+          "link": 49
+        }
+      ],
+      "outputs": [
+        {
+          "name": "Patched Model",
+          "type": "MODEL",
+          "links": [
+            47
+          ]
+        }
+      ],
+      "properties": {
+        "cnr_id": "ComfyUI-DyPE",
+        "ver": "7dbea3b189ef5d75ead0f7bb5c237eee180ac19a",
+        "Node name for S&R": "DyPE_FLUX"
+      },
+      "widgets_values": [
+        2048,
+        2048,
+        "auto",
+        "vision_yarn",
+        true,
+        true,
+        1024,
+        1,
+        2,
+        2,
+        0.5,
+        1.15
+      ],
+      "color": "#332922",
+      "bgcolor": "#593930"
+    },
+    {
+      "id": 52,
+      "type": "MarkdownNote",
+      "pos": [
+        908.5210076660273,
+        908.6339681882662
+      ],
+      "size": [
+        297.9693678810893,
+        137.84797136317843
+      ],
+      "flags": {},
+      "order": 4,
+      "mode": 0,
+      "inputs": [],
+      "outputs": [],
+      "title": "Better quality",
+      "properties": {
+        "ue_properties": {
+          "widget_ue_connectable": {},
+          "version": "7.1",
+          "input_ue_unconnectable": {}
+        }
+      },
+      "widgets_values": [
+        "## Speckle noise\n\n* To eliminate white speckle noise, use a LoRA. [DeJPEG-LoRA](https://huggingface.co/wcde/Z-Image-Turbo-DeJPEG-Lora) works quite well. It also improves proportions.\n* Increasing dype_exponent can reduce this noise, but it may distort proportions.\n\n"
+      ],
+      "color": "#322",
+      "bgcolor": "#533"
+    },
+    {
+      "id": 35,
+      "type": "MarkdownNote",
+      "pos": [
+        -390,
+        270
+      ],
+      "size": [
+        489.2486851990984,
+        317.3553719008264
+      ],
+      "flags": {
+        "collapsed": false
+      },
+      "order": 5,
+      "mode": 0,
+      "inputs": [],
+      "outputs": [],
+      "title": "Model link",
+      "properties": {},
+      "widgets_values": [
+        "## Model links\n\n**text_encoders**\n\n- [qwen_3_4b.safetensors](https://huggingface.co/Comfy-Org/z_image_turbo/resolve/main/split_files/text_encoders/qwen_3_4b.safetensors)\n\n**diffusion_models**\n\n- [z_image_turbo_bf16.safetensors](https://huggingface.co/Comfy-Org/z_image_turbo/resolve/main/split_files/diffusion_models/z_image_turbo_bf16.safetensors)\n\n**vae**\n\n- [ae.safetensors](https://huggingface.co/Comfy-Org/z_image_turbo/resolve/main/split_files/vae/ae.safetensors)\n\n\nModel Storage Location\n\n```\n📂 ComfyUI/\n├── 📂 models/\n│   ├── 📂 text_encoders/\n│   │      └── qwen_3_4b.safetensors\n│   ├── 📂 diffusion_models/\n│   │      └── z_image_turbo_bf16.safetensors\n│   └── 📂 vae/\n│          └── ae.safetensors\n```\n\n"
+      ],
+      "color": "#432",
+      "bgcolor": "#653"
+    },
+    {
       "id": 49,
       "type": "MarkdownNote",
       "pos": [
-        -383.3530660677599,
-        714.9195027807318
+        -386.35832527136625,
+        631.5235598806564
       ],
       "size": [
         481.8661447405933,
         328.1129300408643
       ],
       "flags": {},
-      "order": 5,
+      "order": 6,
       "mode": 0,
       "inputs": [],
       "outputs": [],
@@ -497,15 +579,15 @@
       "id": 43,
       "type": "VAEDecode",
       "pos": [
-        1006.7658843684605,
-        897.0716563819947
+        1257.0059843684596,
+        911.2044563819945
       ],
       "size": [
         210,
         46
       ],
       "flags": {},
-      "order": 11,
+      "order": 13,
       "mode": 0,
       "inputs": [
         {
@@ -544,56 +626,44 @@
       "widgets_values": []
     },
     {
-      "id": 48,
-      "type": "DyPE_FLUX",
+      "id": 50,
+      "type": "LoraLoaderModelOnly",
       "pos": [
-        487.4055670233965,
-        706.7051732742663
+        133.36299999999994,
+        926.2149999999997
       ],
       "size": [
-        342.5881686404282,
-        326.75987991084776
+        270,
+        82
       ],
       "flags": {},
-      "order": 6,
+      "order": 8,
       "mode": 0,
       "inputs": [
         {
           "name": "model",
           "type": "MODEL",
-          "link": 46
+          "link": 48
         }
       ],
       "outputs": [
         {
-          "name": "Patched Model",
+          "name": "MODEL",
           "type": "MODEL",
           "links": [
-            47
+            49
           ]
         }
       ],
       "properties": {
-        "cnr_id": "ComfyUI-DyPE",
-        "ver": "7dbea3b189ef5d75ead0f7bb5c237eee180ac19a",
-        "Node name for S&R": "DyPE_FLUX"
+        "cnr_id": "comfy-core",
+        "ver": "0.3.76",
+        "Node name for S&R": "LoraLoaderModelOnly"
       },
       "widgets_values": [
-        2048,
-        2048,
-        "auto",
-        "ntk",
-        true,
-        true,
-        1024,
-        1,
-        2,
-        2,
-        0.5,
-        1.15
-      ],
-      "color": "#332922",
-      "bgcolor": "#593930"
+        "zit\\ench-ZI-dejpeg_lite.safetensors",
+        1
+      ]
     }
   ],
   "links": [
@@ -670,18 +740,26 @@
       "IMAGE"
     ],
     [
-      46,
-      46,
-      0,
+      47,
       48,
+      0,
+      47,
       0,
       "MODEL"
     ],
     [
-      47,
       48,
+      46,
       0,
-      47,
+      50,
+      0,
+      "MODEL"
+    ],
+    [
+      49,
+      50,
+      0,
+      48,
       0,
       "MODEL"
     ]
@@ -743,10 +821,10 @@
   "config": {},
   "extra": {
     "ds": {
-      "scale": 0.8403573356722741,
+      "scale": 0.7513148009015777,
       "offset": [
-        481.6702101560164,
-        -113.59117086923438
+        490,
+        -160
       ]
     },
     "frontendVersion": "1.33.10",
