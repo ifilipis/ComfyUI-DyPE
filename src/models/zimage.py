@@ -67,8 +67,8 @@ class PosEmbedZImage(DyPEBasePosEmbed):
         components = []
 
         scale_global = self.external_scale_hint
-        apply_grid_scaling_only = (self.current_timestep <= self.dype_start_sigma)
-        blend_manual = self._blend_to_full_scale()
+        apply_grid_scaling_only = (self.current_timestep >= self.dype_manual_cutoff)
+        blend_manual = 1.0 - self._blend_to_full_scale()
 
         if scale_global > 1.0 and self.dype:
             mscale_start = 0.05 * math.log(scale_global) + 1.0
