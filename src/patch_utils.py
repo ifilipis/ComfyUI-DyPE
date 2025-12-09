@@ -9,7 +9,7 @@ from comfy import model_sampling
 from .models.flux import PosEmbedFlux
 from .models.nunchaku import PosEmbedNunchaku
 from .models.qwen import PosEmbedQwen
-from .models.z_image import PosEmbedZImage
+from .models.zimage import PosEmbedZImage
 
 
 def apply_dype_to_model(model: ModelPatcher, model_type: str, width: int, height: int, method: str, yarn_alt_scaling: bool, enable_dype: bool, dype_scale: float, dype_exponent: float, base_shift: float, max_shift: float, base_resolution: int = 1024, dype_start_sigma: float = 1.0) -> ModelPatcher:
@@ -17,7 +17,7 @@ def apply_dype_to_model(model: ModelPatcher, model_type: str, width: int, height
 
     is_nunchaku = False
     is_qwen = False
-    is_zimage = False
+    is_z_image = False
 
     normalized_model_type = model_type.replace("_", "").lower()
 
@@ -26,7 +26,7 @@ def apply_dype_to_model(model: ModelPatcher, model_type: str, width: int, height
     elif normalized_model_type == "qwen":
         is_qwen = True
     elif normalized_model_type == "zimage":
-        is_zimage = True
+        is_z_image = True
     elif model_type == "flux":
         pass # defaults false
     else: # auto
@@ -37,7 +37,7 @@ def apply_dype_to_model(model: ModelPatcher, model_type: str, width: int, height
             if "QwenImage" in model_class_name:
                 is_qwen = True
             elif "NextDiT" in model_class_name or hasattr(dm, "rope_embedder"):
-                is_zimage = True
+                is_z_image = True
             elif hasattr(dm, "model") and hasattr(dm.model, "pos_embed"):
                 is_nunchaku = True
             elif hasattr(dm, "pe_embedder"):
@@ -47,7 +47,7 @@ def apply_dype_to_model(model: ModelPatcher, model_type: str, width: int, height
         else:
             raise ValueError("The provided model is not a compatible model.")
 
-    new_dype_params = (width, height, base_shift, max_shift, method, yarn_alt_scaling, base_resolution, dype_start_sigma, is_nunchaku, is_qwen, is_zimage)
+    new_dype_params = (width, height, base_shift, max_shift, method, yarn_alt_scaling, base_resolution, dype_start_sigma, is_nunchaku, is_qwen, is_z_image)
 
     should_patch_schedule = True
     if hasattr(m.model, "_dype_params"):
@@ -61,7 +61,7 @@ def apply_dype_to_model(model: ModelPatcher, model_type: str, width: int, height
     default_base_patches = (base_resolution // 8) // 2
     default_base_seq_len = default_base_patches * default_base_patches
 
-    if is_zimage:
+    if is_z_image:
         axes_lens = getattr(m.model.diffusion_model, "axes_lens", None)
         if isinstance(axes_lens, (list, tuple)) and len(axes_lens) >= 3:
             base_patch_h_tokens = int(axes_lens[1])
@@ -85,7 +85,7 @@ def apply_dype_to_model(model: ModelPatcher, model_type: str, width: int, height
 
     if enable_dype and should_patch_schedule:
         try:
-            if isinstance(m.model.model_sampling, model_sampling.ModelSamplingFlux) or is_qwen or is_zimage:
+            if isinstance(m.model.model_sampling, model_sampling.ModelSamplingFlux) or is_qwen or is_z_image:
                 latent_h, latent_w = height // 8, width // 8
                 padded_h, padded_w = math.ceil(latent_h / patch_size) * patch_size, math.ceil(latent_w / patch_size) * patch_size
                 image_seq_len = (padded_h // patch_size) * (padded_w // patch_size)
@@ -124,7 +124,7 @@ def apply_dype_to_model(model: ModelPatcher, model_type: str, width: int, height
         if is_nunchaku:
             orig_embedder = m.model.diffusion_model.model.pos_embed
             target_patch_path = "diffusion_model.model.pos_embed"
-        elif is_zimage:
+        elif is_z_image:
             orig_embedder = m.model.diffusion_model.rope_embedder
             target_patch_path = "diffusion_model.rope_embedder"
         else:
@@ -140,10 +140,10 @@ def apply_dype_to_model(model: ModelPatcher, model_type: str, width: int, height
         embedder_cls = PosEmbedNunchaku
     elif is_qwen:
         embedder_cls = PosEmbedQwen
-    elif is_zimage:
+    elif is_z_image:
         embedder_cls = PosEmbedZImage
 
-    embedder_base_patches = derived_base_patches if is_zimage else None
+    embedder_base_patches = derived_base_patches if is_z_image else None
 
     new_pe_embedder = embedder_cls(
         theta, axes_dim, method, yarn_alt_scaling, enable_dype,
@@ -152,7 +152,7 @@ def apply_dype_to_model(model: ModelPatcher, model_type: str, width: int, height
 
     m.add_object_patch(target_patch_path, new_pe_embedder)
 
-    if is_zimage:
+    if is_z_image:
         original_patchify_and_embed = getattr(m.model.diffusion_model, "patchify_and_embed", None)
         if original_patchify_and_embed is not None:
             m.model.diffusion_model._dype_original_patchify_and_embed = original_patchify_and_embed
