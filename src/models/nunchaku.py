@@ -14,7 +14,6 @@ class PosEmbedNunchaku(DyPEBasePosEmbed):
         if cos.dim() < 2:
             raise RuntimeError(f"Unexpected cos shape {tuple(cos.shape)}")
 
-        # shape components
         *lead, M, D = list(cos.shape)
         if lead:
             batch = int(torch.prod(torch.tensor(lead, dtype=torch.int64)).item())
@@ -60,9 +59,8 @@ class PosEmbedNunchaku(DyPEBasePosEmbed):
             rope_i = self._axis_rope_from_cos_sin(cos, sin)
             emb_parts.append(rope_i)
 
-        # Concatenate along axis dimension: dim = -3
         # shape: (B, M, D_total//2, 1, 2)
-        emb = torch.cat(emb_parts, dim=-3)  
+        emb = torch.cat(emb_parts, dim=-3)
 
         out = emb.unsqueeze(1).to(ids.device)
         return out

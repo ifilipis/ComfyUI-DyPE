@@ -9,7 +9,7 @@ from comfy import model_sampling
 from .models.flux import PosEmbedFlux
 from .models.nunchaku import PosEmbedNunchaku
 from .models.qwen import PosEmbedQwen
-from .models.z_image import PosEmbedZImage
+from .models.zimage import PosEmbedZImage
 
 
 def apply_dype_to_model(model: ModelPatcher, model_type: str, width: int, height: int, method: str, yarn_alt_scaling: bool, enable_dype: bool, dype_scale: float, dype_exponent: float, base_shift: float, max_shift: float, base_resolution: int = 1024, dype_start_sigma: float = 1.0) -> ModelPatcher:
@@ -143,7 +143,7 @@ def apply_dype_to_model(model: ModelPatcher, model_type: str, width: int, height
     elif is_zimage:
         embedder_cls = PosEmbedZImage
 
-    embedder_base_patches = derived_base_patches if is_zimage else None
+    embedder_base_patches = (base_patch_h_tokens, base_patch_w_tokens) if base_patch_h_tokens is not None and base_patch_w_tokens is not None else (derived_base_patches if is_zimage else None)
 
     new_pe_embedder = embedder_cls(
         theta, axes_dim, method, yarn_alt_scaling, enable_dype,
@@ -165,6 +165,9 @@ def apply_dype_to_model(model: ModelPatcher, model_type: str, width: int, height
 
         if base_hw_override is not None:
             m.model.diffusion_model._dype_base_hw = base_hw_override
+            if hasattr(new_pe_embedder, "base_patch_grid"):
+                new_pe_embedder.base_patch_grid = base_hw_override
+                new_pe_embedder.base_patches = max(base_hw_override)
 
         def dype_patchify_and_embed(self, x, cap_feats, cap_mask, t, num_tokens, transformer_options={}):
             pH = pW = self.patch_size
@@ -221,6 +224,9 @@ def apply_dype_to_model(model: ModelPatcher, model_type: str, width: int, height
 
             h_scale = rope_options.get("scale_y", _blend_scale(default_h_scale)) if rope_options is not None else _blend_scale(default_h_scale)
             w_scale = rope_options.get("scale_x", _blend_scale(default_w_scale)) if rope_options is not None else _blend_scale(default_w_scale)
+
+            if hasattr(rope_embedder, "set_scale_hint"):
+                rope_embedder.set_scale_hint(max(h_scale, w_scale))
 
             h_start = rope_options.get("shift_y", 0.0) if rope_options is not None else 0.0
             w_start = rope_options.get("shift_x", 0.0) if rope_options is not None else 0.0
@@ -286,6 +292,10 @@ def apply_dype_to_model(model: ModelPatcher, model_type: str, width: int, height
                     delattr(m.model.diffusion_model, "_dype_base_hw")
 
                 new_pe_embedder.base_patches = default_base_patches
+                if hasattr(new_pe_embedder, "base_patch_grid"):
+                    new_pe_embedder.base_patch_grid = (default_base_patches, default_base_patches)
+                if hasattr(new_pe_embedder, "set_scale_hint"):
+                    new_pe_embedder.set_scale_hint(1.0)
 
                 m.model._dype_zimage_override_active = False
 
