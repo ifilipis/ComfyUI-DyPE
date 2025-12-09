@@ -10,10 +10,12 @@ class PosEmbedZImage(DyPEBasePosEmbed):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.external_scale_hint = 1.0
+        self._scale_hint_pending = False
 
     def set_scale_hint(self, scale: float):
         """Allows patch_utils to force the true scale factor."""
         self.external_scale_hint = max(1.0, scale)
+        self._scale_hint_pending = True
 
     def _blend_to_full_scale(self) -> float:
         t_effective = self.current_timestep
@@ -67,6 +69,7 @@ class PosEmbedZImage(DyPEBasePosEmbed):
         components = []
         
         scale_global = self.external_scale_hint
+        apply_grid_scaling_only = self._scale_hint_pending
 
         if scale_global > 1.0 and self.dype:
             mscale_start = 0.05 * math.log(scale_global) + 1.0
@@ -88,7 +91,7 @@ class PosEmbedZImage(DyPEBasePosEmbed):
 
             is_spatial = (i > 0)
 
-            if is_spatial and scale_global > 1.0:
+            if is_spatial and scale_global > 1.0 and not apply_grid_scaling_only:
                 grid_idx = i - 1
                 base_axis_len = self.base_patch_grid[grid_idx] if grid_idx < len(self.base_patch_grid) else self.base_patches
 
@@ -136,7 +139,8 @@ class PosEmbedZImage(DyPEBasePosEmbed):
                 cos, sin = get_1d_ntk_pos_embed(**common_kwargs, ntk_factor=1.0)
 
             components.append((cos, sin))
-            
+
+        self._scale_hint_pending = False
         return components
 
     def get_components(self, pos: torch.Tensor, freqs_dtype: torch.dtype):
