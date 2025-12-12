@@ -193,6 +193,9 @@ def apply_dype_to_model(model: ModelPatcher, model_type: str, width: int, height
 
             H_tokens, W_tokens = H // pH, W // pW
 
+            if hasattr(self, "rope_embedder") and hasattr(self.rope_embedder, "set_grid_hw"):
+                self.rope_embedder.set_grid_hw((H_tokens, W_tokens), getattr(self, "_dype_base_hw", None))
+
             h_scale = rope_options.get("scale_y", 1.0) if rope_options is not None else 1.0
             w_scale = rope_options.get("scale_x", 1.0) if rope_options is not None else 1.0
 
