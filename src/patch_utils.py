@@ -211,9 +211,6 @@ def apply_dype_to_model(model: ModelPatcher, model_type: str, width: int, height
 
             H_tokens, W_tokens = H // pH, W // pW
 
-            if hasattr(self, "rope_embedder") and hasattr(self.rope_embedder, "set_grid_hw"):
-                self.rope_embedder.set_grid_hw((H_tokens, W_tokens), getattr(self, "_dype_base_hw", None))
-
             if base_hw is not None and len(base_hw) == 2 and base_hw[0] > 0 and base_hw[1] > 0:
                 default_h_scale = H_tokens / base_hw[0]
                 default_w_scale = W_tokens / base_hw[1]
@@ -228,6 +225,9 @@ def apply_dype_to_model(model: ModelPatcher, model_type: str, width: int, height
 
             h_start = rope_options.get("shift_y", 0.0) if rope_options is not None else 0.0
             w_start = rope_options.get("shift_x", 0.0) if rope_options is not None else 0.0
+
+            if hasattr(self, "rope_embedder") and hasattr(self.rope_embedder, "set_grid_hw"):
+                self.rope_embedder.set_grid_hw((H_tokens, W_tokens), getattr(self, "_dype_base_hw", None), (h_scale, w_scale))
 
             x_pos_ids = torch.zeros((bsz, x_emb.shape[1], 3), dtype=torch.float32, device=device)
             x_pos_ids[:, :, 0] = cap_feats.shape[1] + 1

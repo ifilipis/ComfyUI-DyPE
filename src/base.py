@@ -39,19 +39,25 @@ class DyPEBasePosEmbed(nn.Module):
 
         self.current_grid_hw = None
         self.current_base_hw_override = None
+        self.current_grid_scale = None
 
     def set_timestep(self, timestep: float):
         self.current_timestep = timestep
 
-    def set_grid_hw(self, grid_hw: tuple[int, int] | None, base_hw: tuple[int, int] | None):
+    def set_grid_hw(self, grid_hw: tuple[int, int] | None, base_hw: tuple[int, int] | None, grid_scale: tuple[float, float] | None = None):
         if grid_hw is None:
             self.current_grid_hw = None
             self.current_base_hw_override = None
+            self.current_grid_scale = None
             return
 
         self.current_grid_hw = (int(grid_hw[0]), int(grid_hw[1]))
         if base_hw is not None:
             self.current_base_hw_override = (int(base_hw[0]), int(base_hw[1]))
+        if grid_scale is not None:
+            self.current_grid_scale = (float(grid_scale[0]), float(grid_scale[1]))
+        else:
+            self.current_grid_scale = None
 
     def _base_len_for_axis(self, axis_index: int) -> int:
         base_hw = self.current_base_hw_override if self.current_base_hw_override is not None else self.base_hw
@@ -63,13 +69,27 @@ class DyPEBasePosEmbed(nn.Module):
             return max(1, base_hw[1])
         return self.base_patches
 
-    def _axis_current_len(self, pos: torch.Tensor, axis_index: int) -> int:
-        if self.current_grid_hw is not None and axis_index > 0:
-            if axis_index == 1:
-                return max(1, int(self.current_grid_hw[0]))
-            if axis_index == 2:
-                return max(1, int(self.current_grid_hw[1]))
-        return int(pos.max().item() - pos.min().item() + 1)
+    def _axis_grid_effective_len(self, axis_index: int) -> float:
+        if self.current_grid_hw is None or axis_index == 0:
+            return -1.0
+
+        if axis_index == 1:
+            tokens = self.current_grid_hw[0]
+            scale = self.current_grid_scale[0] if self.current_grid_scale is not None else 1.0
+        elif axis_index == 2:
+            tokens = self.current_grid_hw[1]
+            scale = self.current_grid_scale[1] if self.current_grid_scale is not None else 1.0
+        else:
+            tokens = self.current_grid_hw[axis_index - 1]
+            scale = 1.0
+
+        return max(1.0, (tokens - 1) * scale + 1.0)
+
+    def _axis_current_len(self, pos: torch.Tensor, axis_index: int) -> float:
+        grid_len = self._axis_grid_effective_len(axis_index)
+        if grid_len > 0:
+            return grid_len
+        return float(pos.max().item() - pos.min().item() + 1.0)
 
     def _calc_vision_yarn_components(self, pos: torch.Tensor, freqs_dtype: torch.dtype):
         """
@@ -80,11 +100,12 @@ class DyPEBasePosEmbed(nn.Module):
         components = []
         
         if pos.shape[-1] >= 3 and self.current_grid_hw is not None:
-            H_tokens, W_tokens = self.current_grid_hw
+            effective_h = self._axis_grid_effective_len(1)
+            effective_w = self._axis_grid_effective_len(2)
             base_h = self._base_len_for_axis(1)
             base_w = self._base_len_for_axis(2)
-            scale_h = H_tokens / base_h
-            scale_w = W_tokens / base_w
+            scale_h = effective_h / base_h
+            scale_w = effective_w / base_w
             scale_global = max(1.0, max(scale_h, scale_w))
         else:
             if pos.shape[-1] >= 3:
@@ -170,11 +191,12 @@ class DyPEBasePosEmbed(nn.Module):
         components = []
         
         if pos.shape[-1] >= 3 and self.current_grid_hw is not None:
-            H_tokens, W_tokens = self.current_grid_hw
+            effective_h = self._axis_grid_effective_len(1)
+            effective_w = self._axis_grid_effective_len(2)
             base_h = self._base_len_for_axis(1)
             base_w = self._base_len_for_axis(2)
             max_base = max(base_h, base_w)
-            max_current_patches = max(H_tokens, W_tokens)
+            max_current_patches = max(effective_h, effective_w)
         else:
             if pos.shape[-1] >= 3:
                 h_span = int(pos[..., 1].max().item() - pos[..., 1].min().item() + 1)
@@ -240,10 +262,11 @@ class DyPEBasePosEmbed(nn.Module):
         components = []
 
         if pos.shape[-1] >= 3 and self.current_grid_hw is not None:
-            H_tokens, W_tokens = self.current_grid_hw
+            effective_h = self._axis_grid_effective_len(1)
+            effective_w = self._axis_grid_effective_len(2)
             base_h = self._base_len_for_axis(1)
             base_w = self._base_len_for_axis(2)
-            unified_scale = max(H_tokens / base_h, W_tokens / base_w)
+            unified_scale = max(effective_h / base_h, effective_w / base_w)
         else:
             if pos.shape[-1] >= 3:
                 h_span = int(pos[..., 1].max().item() - pos[..., 1].min().item() + 1)
