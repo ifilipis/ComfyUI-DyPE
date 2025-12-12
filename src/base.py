@@ -106,17 +106,17 @@ class DyPEBasePosEmbed(nn.Module):
             base_w = self._base_len_for_axis(2)
             scale_h = effective_h / base_h
             scale_w = effective_w / base_w
-            scale_global = max(1.0, max(scale_h, scale_w))
+            scale_global = max(scale_h, scale_w)
         else:
             if pos.shape[-1] >= 3:
                 h_span = int(pos[..., 1].max().item() - pos[..., 1].min().item() + 1)
                 w_span = int(pos[..., 2].max().item() - pos[..., 2].min().item() + 1)
                 base_h = self._base_len_for_axis(1)
                 base_w = self._base_len_for_axis(2)
-                scale_global = max(1.0, max(h_span / base_h, w_span / base_w))
+                scale_global = max(h_span / base_h, w_span / base_w)
             else:
                 max_current_patches = int(pos.max().item() - pos.min().item() + 1)
-                scale_global = max(1.0, max_current_patches / self.base_patches)
+                scale_global = max_current_patches / self.base_patches
             
         mscale_start = 0.1 * math.log(scale_global) + 1.0
         mscale_end = 1.0
@@ -159,7 +159,7 @@ class DyPEBasePosEmbed(nn.Module):
 
             if i > 0:
                 axis_base_len = self._base_len_for_axis(i)
-                scale_local = max(1.0, current_patches / axis_base_len)
+                scale_local = current_patches / axis_base_len
 
                 # Apply Low Theta protection
                 if force_isotropic:
@@ -278,8 +278,6 @@ class DyPEBasePosEmbed(nn.Module):
                 max_patches = int(pos.max().item() - pos.min().item() + 1)
                 unified_scale = max_patches / self.base_patches
 
-        unified_scale = max(1.0, unified_scale)
-
         for i in range(n_axes):
             axis_pos = pos[..., i]
             axis_dim = self.axes_dim[i]
@@ -288,7 +286,7 @@ class DyPEBasePosEmbed(nn.Module):
             ntk_factor = 1.0
             if i > 0 and unified_scale > 1.0:
                 base_len = self._base_len_for_axis(i)
-                scale_local = max(1.0, (self._axis_current_len(axis_pos, i)) / base_len)
+                scale_local = (self._axis_current_len(axis_pos, i)) / base_len
                 base_ntk = scale_local ** (axis_dim / (axis_dim - 2))
                 if self.dype:
                     k_t = self.dype_scale * (self.current_timestep ** self.dype_exponent)
