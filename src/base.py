@@ -69,6 +69,17 @@ class DyPEBasePosEmbed(nn.Module):
             return max(1, base_hw[1])
         return self.base_patches
 
+    def _scaled_base_len_for_axis(self, axis_index: int) -> float:
+        base_len = float(self._base_len_for_axis(axis_index))
+
+        if axis_index > 0 and self.current_grid_scale is not None:
+            axis_offset = axis_index - 1
+            if axis_offset < len(self.current_grid_scale):
+                scale = self.current_grid_scale[axis_offset]
+                base_len = base_len / max(scale, 1e-8)
+
+        return base_len
+
     def _axis_grid_effective_len(self, axis_index: int) -> float:
         if self.current_grid_hw is None or axis_index == 0:
             return -1.0
@@ -102,8 +113,8 @@ class DyPEBasePosEmbed(nn.Module):
         if pos.shape[-1] >= 3 and self.current_grid_hw is not None:
             effective_h = self._axis_grid_effective_len(1)
             effective_w = self._axis_grid_effective_len(2)
-            base_h = self._base_len_for_axis(1)
-            base_w = self._base_len_for_axis(2)
+            base_h = self._scaled_base_len_for_axis(1)
+            base_w = self._scaled_base_len_for_axis(2)
             scale_h = effective_h / base_h
             scale_w = effective_w / base_w
             scale_global = max(scale_h, scale_w)
@@ -111,8 +122,8 @@ class DyPEBasePosEmbed(nn.Module):
             if pos.shape[-1] >= 3:
                 h_span = int(pos[..., 1].max().item() - pos[..., 1].min().item() + 1)
                 w_span = int(pos[..., 2].max().item() - pos[..., 2].min().item() + 1)
-                base_h = self._base_len_for_axis(1)
-                base_w = self._base_len_for_axis(2)
+                base_h = self._scaled_base_len_for_axis(1)
+                base_w = self._scaled_base_len_for_axis(2)
                 scale_global = max(h_span / base_h, w_span / base_w)
             else:
                 max_current_patches = int(pos.max().item() - pos.min().item() + 1)
@@ -158,7 +169,7 @@ class DyPEBasePosEmbed(nn.Module):
             }
 
             if i > 0:
-                axis_base_len = self._base_len_for_axis(i)
+                axis_base_len = self._scaled_base_len_for_axis(i)
                 scale_local = current_patches / axis_base_len
 
                 # Apply Low Theta protection
@@ -190,16 +201,16 @@ class DyPEBasePosEmbed(nn.Module):
         if pos.shape[-1] >= 3 and self.current_grid_hw is not None:
             effective_h = self._axis_grid_effective_len(1)
             effective_w = self._axis_grid_effective_len(2)
-            base_h = self._base_len_for_axis(1)
-            base_w = self._base_len_for_axis(2)
+            base_h = self._scaled_base_len_for_axis(1)
+            base_w = self._scaled_base_len_for_axis(2)
             max_base = max(base_h, base_w)
             max_current_patches = max(effective_h, effective_w)
         else:
             if pos.shape[-1] >= 3:
                 h_span = int(pos[..., 1].max().item() - pos[..., 1].min().item() + 1)
                 w_span = int(pos[..., 2].max().item() - pos[..., 2].min().item() + 1)
-                base_h = self._base_len_for_axis(1)
-                base_w = self._base_len_for_axis(2)
+                base_h = self._scaled_base_len_for_axis(1)
+                base_w = self._scaled_base_len_for_axis(2)
                 max_base = max(base_h, base_w)
                 max_current_patches = max(h_span, w_span)
             else:
@@ -219,7 +230,7 @@ class DyPEBasePosEmbed(nn.Module):
                 dype_kwargs = {'dype': self.dype, 'current_timestep': self.current_timestep, 'dype_scale': self.dype_scale, 'dype_exponent': self.dype_exponent}
 
                 current_patches_on_axis = self._axis_current_len(axis_pos, i)
-                axis_base_len = self._base_len_for_axis(i)
+                axis_base_len = self._scaled_base_len_for_axis(i)
                 if i > 0 and current_patches_on_axis > axis_base_len:
                     max_pe_len = torch.tensor(current_patches_on_axis, dtype=freqs_dtype, device=pos.device)
                     cos, sin = get_1d_yarn_pos_embed(**common_kwargs, max_pe_len=max_pe_len, ori_max_pe_len=axis_base_len, **dype_kwargs, use_aggressive_mscale=True)
@@ -234,7 +245,7 @@ class DyPEBasePosEmbed(nn.Module):
 
                 if i > 0 and needs_extrapolation:
                     current_patches_on_axis = self._axis_current_len(axis_pos, i)
-                    axis_base_len = self._base_len_for_axis(i)
+                    axis_base_len = self._scaled_base_len_for_axis(i)
 
                     max_pe_len = torch.tensor(current_patches_on_axis, dtype=freqs_dtype, device=pos.device)
                     common_kwargs = {'dim': axis_dim, 'pos': axis_pos, 'theta': self.theta, 'use_real': True, 'repeat_interleave_real': True, 'freqs_dtype': freqs_dtype}
@@ -265,7 +276,7 @@ class DyPEBasePosEmbed(nn.Module):
 
             ntk_factor = 1.0
             if i > 0:
-                base_len = self._base_len_for_axis(i)
+                base_len = self._scaled_base_len_for_axis(i)
                 scale_local = (self._axis_current_len(axis_pos, i)) / base_len
                 base_ntk = scale_local ** (axis_dim / (axis_dim - 2))
                 if self.dype:
