@@ -40,6 +40,7 @@ class DyPEBasePosEmbed(nn.Module):
         self.current_grid_hw = None
         self.current_base_hw_override = None
         self.current_grid_scale = None
+        self.start_grid_scale = (1.0, 1.0)
 
     def set_timestep(self, timestep: float):
         self.current_timestep = timestep
@@ -56,6 +57,8 @@ class DyPEBasePosEmbed(nn.Module):
             self.current_base_hw_override = (int(base_hw[0]), int(base_hw[1]))
         if grid_scale is not None:
             self.current_grid_scale = (float(grid_scale[0]), float(grid_scale[1]))
+            if self.start_grid_scale is None:
+                self.start_grid_scale = self.current_grid_scale
         else:
             self.current_grid_scale = None
 
@@ -70,31 +73,27 @@ class DyPEBasePosEmbed(nn.Module):
         return self.base_patches
 
     def _scaled_base_len_for_axis(self, axis_index: int) -> float:
-        base_len = float(self._base_len_for_axis(axis_index))
+        return float(self._base_len_for_axis(axis_index))
 
-        if axis_index > 0 and self.current_grid_scale is not None:
-            axis_offset = axis_index - 1
-            if axis_offset < len(self.current_grid_scale):
-                scale = self.current_grid_scale[axis_offset]
-                base_len = base_len / max(scale, 1e-8)
+    def _axis_scale_ratio(self, axis_index: int) -> float:
+        if self.current_grid_scale is None or axis_index == 0:
+            return 1.0
 
-        return base_len
+        axis_offset = axis_index - 1
+        if axis_offset >= len(self.current_grid_scale):
+            return 1.0
+
+        current_scale = max(self.current_grid_scale[axis_offset], 1e-8)
+        start_scale = self.start_grid_scale[axis_offset] if self.start_grid_scale is not None else 1.0
+        return start_scale / current_scale
 
     def _axis_grid_effective_len(self, axis_index: int) -> float:
         if self.current_grid_hw is None or axis_index == 0:
             return -1.0
 
-        if axis_index == 1:
-            tokens = self.current_grid_hw[0]
-            scale = self.current_grid_scale[0] if self.current_grid_scale is not None else 1.0
-        elif axis_index == 2:
-            tokens = self.current_grid_hw[1]
-            scale = self.current_grid_scale[1] if self.current_grid_scale is not None else 1.0
-        else:
-            tokens = self.current_grid_hw[axis_index - 1]
-            scale = self.current_grid_scale[axis_index - 1] if self.current_grid_scale is not None else 1.0
-
-        return max(1.0, tokens * scale)
+        base_len = float(self._base_len_for_axis(axis_index))
+        scale_ratio = self._axis_scale_ratio(axis_index)
+        return max(1.0, base_len * scale_ratio)
 
     def _axis_current_len(self, pos: torch.Tensor, axis_index: int) -> float:
         grid_len = self._axis_grid_effective_len(axis_index)
