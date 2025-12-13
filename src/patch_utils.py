@@ -227,7 +227,9 @@ def apply_dype_to_model(model: ModelPatcher, model_type: str, width: int, height
             w_start = rope_options.get("shift_x", 0.0) if rope_options is not None else 0.0
 
             if hasattr(self, "rope_embedder") and hasattr(self.rope_embedder, "set_grid_hw"):
-                self.rope_embedder.set_grid_hw((H_tokens, W_tokens), getattr(self, "_dype_base_hw", None), (h_scale, w_scale))
+                inv_h = 1.0 / max(h_scale, 1e-8)
+                inv_w = 1.0 / max(w_scale, 1e-8)
+                self.rope_embedder.set_grid_hw((H_tokens, W_tokens), getattr(self, "_dype_base_hw", None), (inv_h, inv_w))
 
             x_pos_ids = torch.zeros((bsz, x_emb.shape[1], 3), dtype=torch.float32, device=device)
             x_pos_ids[:, :, 0] = cap_feats.shape[1] + 1

@@ -40,7 +40,7 @@ class DyPEBasePosEmbed(nn.Module):
         self.current_grid_hw = None
         self.current_base_hw_override = None
         self.current_grid_scale = None
-        self.start_grid_scale = (1.0, 1.0)
+        self.start_grid_scale = None
 
     def set_timestep(self, timestep: float):
         self.current_timestep = timestep
@@ -76,30 +76,24 @@ class DyPEBasePosEmbed(nn.Module):
         return float(self._base_len_for_axis(axis_index))
 
     def _axis_scale_ratio(self, axis_index: int) -> float:
-        if self.current_grid_scale is None or axis_index == 0:
+        if self.current_grid_scale is None or self.start_grid_scale is None or axis_index == 0:
             return 1.0
 
-        axis_offset = axis_index - 1
-        if axis_offset >= len(self.current_grid_scale):
-            return 1.0
-
+        axis_offset = min(axis_index - 1, len(self.current_grid_scale) - 1)
         current_scale = max(self.current_grid_scale[axis_offset], 1e-8)
-        start_scale = self.start_grid_scale[axis_offset] if self.start_grid_scale is not None else 1.0
+        start_scale = max(self.start_grid_scale[axis_offset], 1e-8)
         return start_scale / current_scale
 
-    def _axis_grid_effective_len(self, axis_index: int) -> float:
-        if self.current_grid_hw is None or axis_index == 0:
-            return -1.0
+    def _current_scale_value(self) -> float:
+        if self.current_grid_scale is None or self.start_grid_scale is None:
+            return 1.0
 
-        base_len = float(self._base_len_for_axis(axis_index))
-        scale_ratio = self._axis_scale_ratio(axis_index)
-        return max(1.0, base_len * scale_ratio)
+        ratios = []
+        for idx, current in enumerate(self.current_grid_scale):
+            start = self.start_grid_scale[idx] if idx < len(self.start_grid_scale) else self.start_grid_scale[-1]
+            ratios.append(max(start, 1e-8) / max(current, 1e-8))
 
-    def _axis_current_len(self, pos: torch.Tensor, axis_index: int) -> float:
-        grid_len = self._axis_grid_effective_len(axis_index)
-        if grid_len > 0:
-            return grid_len
-        return float(pos.max().item() - pos.min().item() + 1.0)
+        return max(ratios) if ratios else 1.0
 
     def _calc_vision_yarn_components(self, pos: torch.Tensor, freqs_dtype: torch.dtype):
         """
@@ -109,24 +103,7 @@ class DyPEBasePosEmbed(nn.Module):
         n_axes = pos.shape[-1]
         components = []
         
-        if pos.shape[-1] >= 3 and self.current_grid_hw is not None:
-            effective_h = self._axis_grid_effective_len(1)
-            effective_w = self._axis_grid_effective_len(2)
-            base_h = self._scaled_base_len_for_axis(1)
-            base_w = self._scaled_base_len_for_axis(2)
-            scale_h = effective_h / base_h
-            scale_w = effective_w / base_w
-            scale_global = max(scale_h, scale_w)
-        else:
-            if pos.shape[-1] >= 3:
-                h_span = int(pos[..., 1].max().item() - pos[..., 1].min().item() + 1)
-                w_span = int(pos[..., 2].max().item() - pos[..., 2].min().item() + 1)
-                base_h = self._scaled_base_len_for_axis(1)
-                base_w = self._scaled_base_len_for_axis(2)
-                scale_global = max(h_span / base_h, w_span / base_w)
-            else:
-                max_current_patches = int(pos.max().item() - pos.min().item() + 1)
-                scale_global = max_current_patches / self.base_patches
+        scale_global = self._current_scale_value()
             
         mscale_start = 0.1 * math.log(scale_global) + 1.0
         mscale_end = 1.0
@@ -147,7 +124,7 @@ class DyPEBasePosEmbed(nn.Module):
         for i in range(n_axes):
             axis_pos = pos[..., i]
             axis_dim = self.axes_dim[i]
-            current_patches = self._axis_current_len(axis_pos, i)
+            scale_local = self._axis_scale_ratio(i)
             
             common_kwargs = {
                 'dim': axis_dim,
@@ -169,7 +146,6 @@ class DyPEBasePosEmbed(nn.Module):
 
             if i > 0:
                 axis_base_len = self._scaled_base_len_for_axis(i)
-                scale_local = current_patches / axis_base_len
 
                 # Apply Low Theta protection
                 if force_isotropic:
@@ -197,68 +173,37 @@ class DyPEBasePosEmbed(nn.Module):
         n_axes = pos.shape[-1]
         components = []
         
-        if pos.shape[-1] >= 3 and self.current_grid_hw is not None:
-            effective_h = self._axis_grid_effective_len(1)
-            effective_w = self._axis_grid_effective_len(2)
-            base_h = self._scaled_base_len_for_axis(1)
-            base_w = self._scaled_base_len_for_axis(2)
-            max_base = max(base_h, base_w)
-            max_current_patches = max(effective_h, effective_w)
-        else:
-            if pos.shape[-1] >= 3:
-                h_span = int(pos[..., 1].max().item() - pos[..., 1].min().item() + 1)
-                w_span = int(pos[..., 2].max().item() - pos[..., 2].min().item() + 1)
-                base_h = self._scaled_base_len_for_axis(1)
-                base_w = self._scaled_base_len_for_axis(2)
-                max_base = max(base_h, base_w)
-                max_current_patches = max(h_span, w_span)
-            else:
-                max_base = self.base_patches
-                max_current_patches = int(pos.max().item() - pos.min().item() + 1)
+        scale_value = self._current_scale_value()
 
-        needs_extrapolation = (max_current_patches > max_base)
+        needs_extrapolation = scale_value > 1.0
 
         force_isotropic = self.theta < 1000.0
         use_anisotropic = self.yarn_alt_scaling and not force_isotropic
 
-        if needs_extrapolation and use_anisotropic:
-            for i in range(n_axes):
-                axis_pos = pos[..., i]
-                axis_dim = self.axes_dim[i]
-                common_kwargs = {'dim': axis_dim, 'pos': axis_pos, 'theta': self.theta, 'use_real': True, 'repeat_interleave_real': True, 'freqs_dtype': freqs_dtype}
-                dype_kwargs = {'dype': self.dype, 'current_timestep': self.current_timestep, 'dype_scale': self.dype_scale, 'dype_exponent': self.dype_exponent}
+        for i in range(n_axes):
+            axis_pos = pos[..., i]
+            axis_dim = self.axes_dim[i]
+            common_kwargs = {'dim': axis_dim, 'pos': axis_pos, 'theta': self.theta, 'use_real': True, 'repeat_interleave_real': True, 'freqs_dtype': freqs_dtype}
+            dype_kwargs = {'dype': self.dype, 'current_timestep': self.current_timestep, 'dype_scale': self.dype_scale, 'dype_exponent': self.dype_exponent}
 
-                current_patches_on_axis = self._axis_current_len(axis_pos, i)
-                axis_base_len = self._scaled_base_len_for_axis(i)
-                if i > 0 and current_patches_on_axis > axis_base_len:
-                    max_pe_len = torch.tensor(current_patches_on_axis, dtype=freqs_dtype, device=pos.device)
-                    cos, sin = get_1d_yarn_pos_embed(**common_kwargs, max_pe_len=max_pe_len, ori_max_pe_len=axis_base_len, **dype_kwargs, use_aggressive_mscale=True)
-                else:
-                    cos, sin = get_1d_ntk_pos_embed(**common_kwargs, ntk_factor=1.0)
-                
-                components.append((cos, sin))
-        else:
-            for i in range(n_axes):
-                axis_pos = pos[..., i]
-                axis_dim = self.axes_dim[i]
+            axis_base_len = self._scaled_base_len_for_axis(i)
+            axis_scale = self._axis_scale_ratio(i)
+            current_len = axis_base_len * axis_scale
 
-                if i > 0 and needs_extrapolation:
-                    current_patches_on_axis = self._axis_current_len(axis_pos, i)
-                    axis_base_len = self._scaled_base_len_for_axis(i)
+            if i > 0 and needs_extrapolation:
+                max_pe_len = torch.tensor(current_len, dtype=freqs_dtype, device=pos.device)
+                cos, sin = get_1d_yarn_pos_embed(
+                    **common_kwargs,
+                    max_pe_len=max_pe_len,
+                    ori_max_pe_len=axis_base_len,
+                    **dype_kwargs,
+                    use_aggressive_mscale=use_anisotropic
+                )
+            else:
+                cos, sin = get_1d_ntk_pos_embed(**common_kwargs, ntk_factor=1.0)
 
-                    max_pe_len = torch.tensor(current_patches_on_axis, dtype=freqs_dtype, device=pos.device)
-                    common_kwargs = {'dim': axis_dim, 'pos': axis_pos, 'theta': self.theta, 'use_real': True, 'repeat_interleave_real': True, 'freqs_dtype': freqs_dtype}
-                    dype_kwargs = {'dype': self.dype, 'current_timestep': self.current_timestep, 'dype_scale': self.dype_scale, 'dype_exponent': self.dype_exponent}
+            components.append((cos, sin))
 
-                    cos, sin = get_1d_yarn_pos_embed(
-                        **common_kwargs, max_pe_len=max_pe_len, ori_max_pe_len=axis_base_len, **dype_kwargs, use_aggressive_mscale=False
-                    )
-                else:
-                    common_kwargs = {'dim': axis_dim, 'pos': axis_pos, 'theta': self.theta, 'use_real': True, 'repeat_interleave_real': True, 'freqs_dtype': freqs_dtype}
-                    cos, sin = get_1d_ntk_pos_embed(**common_kwargs, ntk_factor=1.0)
-
-                components.append((cos, sin))
-            
         return components
 
     def _calc_ntk_components(self, pos: torch.Tensor, freqs_dtype: torch.dtype):
@@ -275,8 +220,7 @@ class DyPEBasePosEmbed(nn.Module):
 
             ntk_factor = 1.0
             if i > 0:
-                base_len = self._scaled_base_len_for_axis(i)
-                scale_local = (self._axis_current_len(axis_pos, i)) / base_len
+                scale_local = self._axis_scale_ratio(i)
                 base_ntk = scale_local ** (axis_dim / (axis_dim - 2))
                 if self.dype:
                     k_t = self.dype_scale * (self.current_timestep ** self.dype_exponent)
