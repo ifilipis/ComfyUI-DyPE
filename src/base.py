@@ -39,28 +39,29 @@ class DyPEBasePosEmbed(nn.Module):
 
         self.current_grid_hw = None
         self.current_base_hw_override = None
-        self.current_grid_scale = None
         self.start_grid_scale = None
 
     def set_timestep(self, timestep: float):
         self.current_timestep = timestep
 
+    def _time_norm(self) -> float:
+        if self.current_timestep > self.dype_start_sigma:
+            return 1.0
+
+        return self.current_timestep / self.dype_start_sigma if self.dype_start_sigma > 0 else 1.0
+
     def set_grid_hw(self, grid_hw: tuple[int, int] | None, base_hw: tuple[int, int] | None, grid_scale: tuple[float, float] | None = None):
         if grid_hw is None:
             self.current_grid_hw = None
             self.current_base_hw_override = None
-            self.current_grid_scale = None
             return
 
         self.current_grid_hw = (int(grid_hw[0]), int(grid_hw[1]))
         if base_hw is not None:
             self.current_base_hw_override = (int(base_hw[0]), int(base_hw[1]))
         if grid_scale is not None:
-            self.current_grid_scale = (float(grid_scale[0]), float(grid_scale[1]))
             if self.start_grid_scale is None:
-                self.start_grid_scale = self.current_grid_scale
-        else:
-            self.current_grid_scale = None
+                self.start_grid_scale = (float(grid_scale[0]), float(grid_scale[1]))
 
     def _base_len_for_axis(self, axis_index: int) -> int:
         base_hw = self.current_base_hw_override if self.current_base_hw_override is not None else self.base_hw
@@ -76,22 +77,24 @@ class DyPEBasePosEmbed(nn.Module):
         return float(self._base_len_for_axis(axis_index))
 
     def _axis_scale_ratio(self, axis_index: int) -> float:
-        if self.current_grid_scale is None or self.start_grid_scale is None or axis_index == 0:
+        if self.start_grid_scale is None or axis_index == 0:
             return 1.0
 
-        axis_offset = min(axis_index - 1, len(self.current_grid_scale) - 1)
-        current_scale = max(self.current_grid_scale[axis_offset], 1e-8)
+        axis_offset = min(axis_index - 1, len(self.start_grid_scale) - 1)
         start_scale = max(self.start_grid_scale[axis_offset], 1e-8)
-        return start_scale / current_scale
+
+        t_norm = self._time_norm()
+
+        return 1.0 + (start_scale - 1.0) * (1.0 - t_norm)
 
     def _current_scale_value(self) -> float:
-        if self.current_grid_scale is None or self.start_grid_scale is None:
+        if self.start_grid_scale is None:
             return 1.0
 
         ratios = []
-        for idx, current in enumerate(self.current_grid_scale):
-            start = self.start_grid_scale[idx] if idx < len(self.start_grid_scale) else self.start_grid_scale[-1]
-            ratios.append(max(start, 1e-8) / max(current, 1e-8))
+        for idx, start in enumerate(self.start_grid_scale):
+            axis_idx = idx + 1
+            ratios.append(self._axis_scale_ratio(axis_idx))
 
         return max(ratios) if ratios else 1.0
 
@@ -107,13 +110,8 @@ class DyPEBasePosEmbed(nn.Module):
             
         mscale_start = 0.1 * math.log(scale_global) + 1.0
         mscale_end = 1.0
-        
-        t_effective = self.current_timestep
-        
-        if t_effective > self.dype_start_sigma:
-            t_norm = 1.0
-        else:
-            t_norm = t_effective / self.dype_start_sigma
+
+        t_norm = self._time_norm()
 
         t_factor = math.pow(t_norm, self.dype_exponent)
         current_mscale = mscale_end + (mscale_start - mscale_end) * t_factor
@@ -221,12 +219,11 @@ class DyPEBasePosEmbed(nn.Module):
             ntk_factor = 1.0
             if i > 0:
                 scale_local = self._axis_scale_ratio(i)
-                base_ntk = scale_local ** (axis_dim / (axis_dim - 2))
+                blend = (1.0 - self._time_norm()) ** self.dype_exponent
                 if self.dype:
-                    k_t = self.dype_scale * (self.current_timestep ** self.dype_exponent)
-                    ntk_factor = base_ntk ** k_t
-                else:
-                    ntk_factor = base_ntk
+                    blend = min(1.0, self.dype_scale * blend)
+
+                ntk_factor = 1.0 + (scale_local - 1.0) * blend
 
             cos, sin = get_1d_ntk_pos_embed(**common_kwargs, ntk_factor=ntk_factor)
             components.append((cos, sin))
