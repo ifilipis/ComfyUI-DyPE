@@ -83,9 +83,11 @@ class DyPEBasePosEmbed(nn.Module):
         axis_offset = min(axis_index - 1, len(self.start_grid_scale) - 1)
         start_scale = max(self.start_grid_scale[axis_offset], 1e-8)
 
-        t_norm = self._time_norm()
+        blend = (1.0 - self._time_norm()) ** self.dype_exponent
+        if self.dype:
+            blend = min(1.0, self.dype_scale * blend)
 
-        return 1.0 + (start_scale - 1.0) * (1.0 - t_norm)
+        return 1.0 + (start_scale - 1.0) * blend
 
     def _current_scale_value(self) -> float:
         if self.start_grid_scale is None:
@@ -218,12 +220,7 @@ class DyPEBasePosEmbed(nn.Module):
 
             ntk_factor = 1.0
             if i > 0:
-                scale_local = self._axis_scale_ratio(i)
-                blend = (1.0 - self._time_norm()) ** self.dype_exponent
-                if self.dype:
-                    blend = min(1.0, self.dype_scale * blend)
-
-                ntk_factor = 1.0 + (scale_local - 1.0) * blend
+                ntk_factor = self._axis_scale_ratio(i)
 
             cos, sin = get_1d_ntk_pos_embed(**common_kwargs, ntk_factor=ntk_factor)
             components.append((cos, sin))
