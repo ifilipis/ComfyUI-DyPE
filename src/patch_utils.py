@@ -143,7 +143,7 @@ def apply_dype_to_model(model: ModelPatcher, model_type: str, width: int, height
     elif is_zimage:
         embedder_cls = PosEmbedZImage
 
-    embedder_base_patches = derived_base_patches if is_zimage else None
+    embedder_base_patches = (base_patch_h_tokens, base_patch_w_tokens) if is_zimage and base_patch_h_tokens is not None and base_patch_w_tokens is not None else (derived_base_patches if is_zimage else None)
 
     new_pe_embedder = embedder_cls(
         theta, axes_dim, method, yarn_alt_scaling, enable_dype,
@@ -210,6 +210,7 @@ def apply_dype_to_model(model: ModelPatcher, model_type: str, width: int, height
                     dype_blend_factor = math.pow(t_norm, dype_exponent)
 
             H_tokens, W_tokens = H // pH, W // pW
+
             if base_hw is not None and len(base_hw) == 2 and base_hw[0] > 0 and base_hw[1] > 0:
                 default_h_scale = H_tokens / base_hw[0]
                 default_w_scale = W_tokens / base_hw[1]
@@ -224,6 +225,9 @@ def apply_dype_to_model(model: ModelPatcher, model_type: str, width: int, height
 
             h_start = rope_options.get("shift_y", 0.0) if rope_options is not None else 0.0
             w_start = rope_options.get("shift_x", 0.0) if rope_options is not None else 0.0
+
+            if hasattr(self, "rope_embedder") and hasattr(self.rope_embedder, "set_grid_hw"):
+                self.rope_embedder.set_grid_hw((H_tokens, W_tokens), getattr(self, "_dype_base_hw", None), (h_scale, w_scale))
 
             x_pos_ids = torch.zeros((bsz, x_emb.shape[1], 3), dtype=torch.float32, device=device)
             x_pos_ids[:, :, 0] = cap_feats.shape[1] + 1
@@ -254,9 +258,6 @@ def apply_dype_to_model(model: ModelPatcher, model_type: str, width: int, height
 
         m.add_object_patch("diffusion_model.patchify_and_embed", types.MethodType(dype_patchify_and_embed, m.model.diffusion_model))
 
-        if original_patchify_and_embed is not None:
-            m.model._dype_zimage_override_active = True
-            m.model._dype_zimage_step_count = 0
 
     sigma_max = m.model.model_sampling.sigma_max.item()
 
@@ -272,22 +273,6 @@ def apply_dype_to_model(model: ModelPatcher, model_type: str, width: int, height
 
         input_x, c = args_dict.get("input"), args_dict.get("c", {})
         output = model_function(input_x, args_dict.get("timestep"), **c)
-
-        if getattr(m.model, "_dype_zimage_override_active", False):
-            current_step = getattr(m.model, "_dype_zimage_step_count", 0) + 1
-            m.model._dype_zimage_step_count = current_step
-
-            if current_sigma is not None and current_sigma <= dype_start_sigma:
-                original_fn = getattr(m.model.diffusion_model, "_dype_original_patchify_and_embed", None)
-                if original_fn is not None:
-                    m.model.diffusion_model.patchify_and_embed = original_fn
-
-                if hasattr(m.model.diffusion_model, "_dype_base_hw"):
-                    delattr(m.model.diffusion_model, "_dype_base_hw")
-
-                new_pe_embedder.base_patches = default_base_patches
-
-                m.model._dype_zimage_override_active = False
 
         return output
 
