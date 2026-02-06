@@ -17,6 +17,7 @@ def apply_dype_to_model(model: ModelPatcher, model_type: str, width: int, height
     is_nunchaku = False
     is_qwen = False
     is_z_image = False
+    is_flux2 = False
 
     if model_type == "nunchaku":
         is_nunchaku = True
@@ -24,6 +25,8 @@ def apply_dype_to_model(model: ModelPatcher, model_type: str, width: int, height
         is_qwen = True
     elif model_type == "z_image":
         is_z_image = True
+    elif model_type == "flux2":
+        is_flux2 = True
     elif model_type == "flux":
         pass
     else: # auto
@@ -34,12 +37,14 @@ def apply_dype_to_model(model: ModelPatcher, model_type: str, width: int, height
                 is_qwen = True
             elif hasattr(dm, "rope_embedder"):
                 is_z_image = True
+            elif hasattr(m.model, "model_config") and m.model.model_config.unet_config.get("image_model") == "flux2":
+                is_flux2 = True
             elif hasattr(dm, "model") and hasattr(dm.model, "pos_embed"):
                 is_nunchaku = True
         else:
             raise ValueError("The provided model is not a compatible model.")
 
-    new_dype_params = (width, height, base_shift, max_shift, method, yarn_alt_scaling, base_resolution, dype_start_sigma, is_nunchaku, is_qwen, is_z_image)
+    new_dype_params = (width, height, base_shift, max_shift, method, yarn_alt_scaling, base_resolution, dype_start_sigma, is_nunchaku, is_qwen, is_z_image, is_flux2)
 
     should_patch_schedule = True
     if hasattr(m.model, "_dype_params"):
@@ -129,8 +134,10 @@ def apply_dype_to_model(model: ModelPatcher, model_type: str, width: int, height
         embedder_cls = PosEmbedQwen
     elif is_z_image:
         embedder_cls = PosEmbedZImage
+    elif is_flux2:
+        embedder_cls = PosEmbedZImage
 
-    embedder_base_patches = derived_base_patches if is_z_image else None
+    embedder_base_patches = derived_base_patches if is_z_image or is_flux2 else None
 
     new_pe_embedder = embedder_cls(
         theta, axes_dim, method, yarn_alt_scaling, enable_dype,
@@ -260,6 +267,9 @@ def apply_dype_to_model(model: ModelPatcher, model_type: str, width: int, height
             transformer_options["dype_requested_hw"] = (height, width)
             transformer_options["dype_base_resolution"] = base_resolution
             c["transformer_options"] = transformer_options
+        elif is_flux2:
+            max_dim = max(float(width), float(height))
+            new_pe_embedder.set_scale_hint(max_dim / float(base_resolution))
 
         return model_function(input_x, args_dict.get("timestep"), **c)
 
