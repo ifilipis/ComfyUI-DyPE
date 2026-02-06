@@ -17,6 +17,7 @@ def apply_dype_to_model(model: ModelPatcher, model_type: str, width: int, height
     is_nunchaku = False
     is_qwen = False
     is_z_image = False
+    is_flux2 = False
 
     if model_type == "nunchaku":
         is_nunchaku = True
@@ -24,10 +25,16 @@ def apply_dype_to_model(model: ModelPatcher, model_type: str, width: int, height
         is_qwen = True
     elif model_type == "z_image":
         is_z_image = True
+    elif model_type == "flux2":
+        is_flux2 = True
     elif model_type == "flux":
         pass
     else: # auto
-        if hasattr(m.model, "diffusion_model"):
+        if hasattr(m.model, "model_config"):
+            unet_config = getattr(m.model.model_config, "unet_config", {})
+            if unet_config.get("image_model") == "flux2":
+                is_flux2 = True
+        if hasattr(m.model, "diffusion_model") and not is_flux2:
             dm = m.model.diffusion_model
             model_class_name = dm.__class__.__name__
             if "QwenImage" in model_class_name:
@@ -39,7 +46,7 @@ def apply_dype_to_model(model: ModelPatcher, model_type: str, width: int, height
         else:
             raise ValueError("The provided model is not a compatible model.")
 
-    new_dype_params = (width, height, base_shift, max_shift, method, yarn_alt_scaling, base_resolution, dype_start_sigma, is_nunchaku, is_qwen, is_z_image)
+    new_dype_params = (width, height, base_shift, max_shift, method, yarn_alt_scaling, base_resolution, dype_start_sigma, is_nunchaku, is_qwen, is_z_image, is_flux2)
 
     should_patch_schedule = True
     if hasattr(m.model, "_dype_params"):
@@ -127,10 +134,10 @@ def apply_dype_to_model(model: ModelPatcher, model_type: str, width: int, height
         embedder_cls = PosEmbedNunchaku
     elif is_qwen:
         embedder_cls = PosEmbedQwen
-    elif is_z_image:
+    elif is_z_image or is_flux2:
         embedder_cls = PosEmbedZImage
 
-    embedder_base_patches = derived_base_patches if is_z_image else None
+    embedder_base_patches = derived_base_patches if (is_z_image or is_flux2) else None
 
     new_pe_embedder = embedder_cls(
         theta, axes_dim, method, yarn_alt_scaling, enable_dype,
@@ -260,6 +267,12 @@ def apply_dype_to_model(model: ModelPatcher, model_type: str, width: int, height
             transformer_options["dype_requested_hw"] = (height, width)
             transformer_options["dype_base_resolution"] = base_resolution
             c["transformer_options"] = transformer_options
+        elif is_flux2 and isinstance(input_x, torch.Tensor) and input_x.dim() >= 4:
+            raw_scale_y = float(base_resolution) / max(1.0, float(height))
+            raw_scale_x = float(base_resolution) / max(1.0, float(width))
+            iso_scale = min(raw_scale_y, raw_scale_x)
+            freq_scale_factor = 1.0 / iso_scale
+            new_pe_embedder.set_scale_hint(freq_scale_factor)
 
         return model_function(input_x, args_dict.get("timestep"), **c)
 
