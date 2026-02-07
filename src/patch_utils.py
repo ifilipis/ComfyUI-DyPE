@@ -276,7 +276,8 @@ def apply_dype_to_model(model: ModelPatcher, model_type: str, width: int, height
             raw_scale_y = float(base_resolution) / max(1.0, float(target_hw[0]))
             raw_scale_x = float(base_resolution) / max(1.0, float(target_hw[1]))
             iso_scale = min(raw_scale_y, raw_scale_x)
-            new_pe_embedder.set_scale_hint(iso_scale)
+            freq_scale_factor = 1.0 / iso_scale
+            new_pe_embedder.set_scale_hint(freq_scale_factor)
 
         return model_function(input_x, args_dict.get("timestep"), **c)
 

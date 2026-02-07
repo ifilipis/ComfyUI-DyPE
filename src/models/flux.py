@@ -1,6 +1,7 @@
 import math
 import torch
 from ..base import DyPEBasePosEmbed
+from ..rope import get_1d_dype_yarn_pos_embed, get_1d_ntk_pos_embed, get_1d_yarn_pos_embed
 
 class PosEmbedFlux(DyPEBasePosEmbed):
     """
@@ -36,7 +37,7 @@ class PosEmbedFlux2Klein(DyPEBasePosEmbed):
         self.external_scale_hint = 1.0
 
     def set_scale_hint(self, scale: float):
-        self.external_scale_hint = scale
+        self.external_scale_hint = max(1.0, scale)
 
     def _blend_to_full_scale(self) -> float:
         t_effective = self.current_timestep
@@ -57,6 +58,71 @@ class PosEmbedFlux2Klein(DyPEBasePosEmbed):
             if axis < pos_scaled.shape[-1]:
                 pos_scaled[..., axis] = pos_scaled[..., axis] * self.external_scale_hint
         return pos_scaled
+
+    def _calc_flux2_components(self, pos: torch.Tensor, freqs_dtype: torch.dtype):
+        n_axes = pos.shape[-1]
+        components = []
+
+        scale_global = self.external_scale_hint
+        current_mscale = self._get_mscale(scale_global) if (scale_global > 1.0 and self.dype) else 1.0
+
+        for i in range(n_axes):
+            axis_pos = pos[..., i]
+            axis_dim = self.axes_dim[i]
+            common_kwargs = {
+                'dim': axis_dim, 'pos': axis_pos, 'theta': self.theta,
+                'use_real': True, 'repeat_interleave_real': True, 'freqs_dtype': freqs_dtype
+            }
+
+            is_spatial = (i > 0)
+
+            if is_spatial and scale_global > 1.0:
+                grid_idx = i - 1
+                base_axis_len = self.base_patch_grid[grid_idx] if grid_idx < len(self.base_patch_grid) else self.base_patches
+
+                if self.method == 'vision_yarn':
+                    dype_kwargs = {
+                        'dype': self.dype, 'current_timestep': self.current_timestep,
+                        'dype_scale': self.dype_scale, 'dype_exponent': self.dype_exponent,
+                        'ntk_scale': scale_global, 'override_mscale': current_mscale,
+                        'linear_scale': scale_global
+                    }
+                    cos, sin = get_1d_dype_yarn_pos_embed(
+                        **common_kwargs, ori_max_pe_len=base_axis_len, **dype_kwargs
+                    )
+                elif self.method == 'yarn':
+                    fake_current_len = int(base_axis_len * scale_global)
+                    max_pe_len = torch.tensor(fake_current_len, dtype=freqs_dtype, device=pos.device)
+                    dype_kwargs = {
+                        'dype': self.dype, 'current_timestep': self.current_timestep,
+                        'dype_scale': self.dype_scale, 'dype_exponent': self.dype_exponent
+                    }
+                    cos, sin = get_1d_yarn_pos_embed(
+                        **common_kwargs, max_pe_len=max_pe_len, ori_max_pe_len=base_axis_len,
+                        **dype_kwargs, use_aggressive_mscale=False
+                    )
+                    if self.dype:
+                        mscale_tensor = torch.tensor(current_mscale, dtype=cos.dtype, device=cos.device)
+                        cos = cos * mscale_tensor
+                        sin = sin * mscale_tensor
+                else:
+                    base_ntk = scale_global ** (axis_dim / (axis_dim - 2))
+                    if self.dype:
+                        k_t = self.dype_scale * (self.current_timestep ** self.dype_exponent)
+                        ntk_factor = base_ntk ** k_t
+                    else:
+                        ntk_factor = base_ntk
+                    ntk_factor = max(1.0, ntk_factor)
+                    cos, sin = get_1d_ntk_pos_embed(**common_kwargs, ntk_factor=ntk_factor)
+            else:
+                cos, sin = get_1d_ntk_pos_embed(**common_kwargs, ntk_factor=1.0)
+
+            components.append((cos, sin))
+
+        return components
+
+    def get_components(self, pos: torch.Tensor, freqs_dtype: torch.dtype):
+        return self._calc_flux2_components(pos, freqs_dtype)
 
     def _resize_rope_grid(self, pos: torch.Tensor) -> torch.Tensor:
         if not self.dype:
@@ -104,9 +170,7 @@ class PosEmbedFlux2Klein(DyPEBasePosEmbed):
         return pos_rescaled
 
     def forward(self, ids: torch.Tensor) -> torch.Tensor:
-        pos = ids.float()
-        pos = self._scale_rope_grid(pos)
-        pos = self._resize_rope_grid(pos)
+        pos = self._resize_rope_grid(ids.float())
         freqs_dtype = torch.bfloat16 if pos.device.type == 'cuda' else torch.float32
 
         components = self.get_components(pos, freqs_dtype)
