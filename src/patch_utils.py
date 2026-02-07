@@ -6,7 +6,7 @@ import comfy
 from comfy.model_patcher import ModelPatcher
 from comfy import model_sampling
 
-from .models.flux import PosEmbedFlux
+from .models.flux import PosEmbedFlux, PosEmbedFlux2Klein
 from .models.nunchaku import PosEmbedNunchaku
 from .models.qwen import PosEmbedQwen
 from .models.zimage import PosEmbedZImage
@@ -17,6 +17,7 @@ def apply_dype_to_model(model: ModelPatcher, model_type: str, width: int, height
     is_nunchaku = False
     is_qwen = False
     is_z_image = False
+    is_flux2 = False
 
     if model_type == "nunchaku":
         is_nunchaku = True
@@ -24,6 +25,8 @@ def apply_dype_to_model(model: ModelPatcher, model_type: str, width: int, height
         is_qwen = True
     elif model_type == "z_image":
         is_z_image = True
+    elif model_type == "flux2":
+        is_flux2 = True
     elif model_type == "flux":
         pass
     else: # auto
@@ -36,10 +39,16 @@ def apply_dype_to_model(model: ModelPatcher, model_type: str, width: int, height
                 is_z_image = True
             elif hasattr(dm, "model") and hasattr(dm.model, "pos_embed"):
                 is_nunchaku = True
+            else:
+                model_config = getattr(m.model, "model_config", None)
+                if model_config is not None:
+                    unet_config = getattr(model_config, "unet_config", {})
+                    if unet_config.get("image_model") == "flux2":
+                        is_flux2 = True
         else:
             raise ValueError("The provided model is not a compatible model.")
 
-    new_dype_params = (width, height, base_shift, max_shift, method, yarn_alt_scaling, base_resolution, dype_start_sigma, is_nunchaku, is_qwen, is_z_image)
+    new_dype_params = (width, height, base_shift, max_shift, method, yarn_alt_scaling, base_resolution, dype_start_sigma, is_nunchaku, is_qwen, is_z_image, is_flux2)
 
     should_patch_schedule = True
     if hasattr(m.model, "_dype_params"):
@@ -67,12 +76,12 @@ def apply_dype_to_model(model: ModelPatcher, model_type: str, width: int, height
         derived_base_patches = max(base_patch_h_tokens, base_patch_w_tokens)
         derived_base_seq_len = base_patch_h_tokens * base_patch_w_tokens
     else:
-        derived_base_patches = (base_resolution // 8) // 2
+        derived_base_patches = (base_resolution // 8) // patch_size
         derived_base_seq_len = derived_base_patches * derived_base_patches
 
     if enable_dype and should_patch_schedule:
         try:
-            if isinstance(m.model.model_sampling, model_sampling.ModelSamplingFlux) or is_qwen or is_z_image:
+            if isinstance(m.model.model_sampling, model_sampling.ModelSamplingFlux) or is_qwen or is_z_image or is_flux2:
                 latent_h, latent_w = height // 8, width // 8
                 padded_h, padded_w = math.ceil(latent_h / patch_size) * patch_size, math.ceil(latent_w / patch_size) * patch_size
                 image_seq_len = (padded_h // patch_size) * (padded_w // patch_size)
@@ -129,8 +138,10 @@ def apply_dype_to_model(model: ModelPatcher, model_type: str, width: int, height
         embedder_cls = PosEmbedQwen
     elif is_z_image:
         embedder_cls = PosEmbedZImage
+    elif is_flux2:
+        embedder_cls = PosEmbedFlux2Klein
 
-    embedder_base_patches = derived_base_patches if is_z_image else None
+    embedder_base_patches = derived_base_patches if (is_z_image or is_flux2) else None
 
     new_pe_embedder = embedder_cls(
         theta, axes_dim, method, yarn_alt_scaling, enable_dype,
@@ -260,6 +271,12 @@ def apply_dype_to_model(model: ModelPatcher, model_type: str, width: int, height
             transformer_options["dype_requested_hw"] = (height, width)
             transformer_options["dype_base_resolution"] = base_resolution
             c["transformer_options"] = transformer_options
+        elif is_flux2 and isinstance(input_x, torch.Tensor) and input_x.dim() >= 4:
+            target_hw = (height, width)
+            raw_scale_y = float(base_resolution) / max(1.0, float(target_hw[0]))
+            raw_scale_x = float(base_resolution) / max(1.0, float(target_hw[1]))
+            iso_scale = min(raw_scale_y, raw_scale_x)
+            new_pe_embedder.set_scale_hint(iso_scale)
 
         return model_function(input_x, args_dict.get("timestep"), **c)
 

@@ -98,6 +98,7 @@ Using the node is straightforward and designed for minimal workflow disruption.
 *   **`model_type`**:
     *   **`auto`**: Attempts to automatically detect the model architecture. Recommended.
     *   **`flux`**: Forces Standard Flux logic.
+    *   **`flux2`**: Forces Flux 2 Klein logic.
     *   **`nunchaku`**: Forces Nunchaku (Quantized Flux) logic.
     *   **`qwen`**: Forces Qwen Image logic.
     *   **`zimage`**: Forces Z-Image (Lumina 2) logic.
