@@ -11,6 +11,45 @@ from .models.nunchaku import PosEmbedNunchaku
 from .models.qwen import PosEmbedQwen
 from .models.zimage import PosEmbedZImage
 
+
+def _flux_klein_attention(q, k, v, pe, num_txt_tokens):
+    from comfy.ldm.flux.math import apply_rope
+
+    if not isinstance(pe, tuple):
+        from comfy.ldm.flux.math import attention
+        return attention(q, k, v, pe=pe)
+
+    pe_self, pe_cross = pe
+    pe_txt = pe_self[:, :, :num_txt_tokens]
+    pe_img_self = pe_self[:, :, num_txt_tokens:]
+    pe_img_cross = pe_cross[:, :, num_txt_tokens:]
+
+    q_txt, q_img = q[:, :, :num_txt_tokens], q[:, :, num_txt_tokens:]
+    k_txt, k_img = k[:, :, :num_txt_tokens], k[:, :, num_txt_tokens:]
+    v_txt, v_img = v[:, :, :num_txt_tokens], v[:, :, num_txt_tokens:]
+
+    q_txt_r = apply_rope(q_txt, q_txt, pe_txt)[0]
+    k_txt_r = apply_rope(k_txt, k_txt, pe_txt)[0]
+    q_img_self = apply_rope(q_img, q_img, pe_img_self)[0]
+    k_img_self = apply_rope(k_img, k_img, pe_img_self)[0]
+    q_img_cross = apply_rope(q_img, q_img, pe_img_cross)[0]
+    k_img_cross = apply_rope(k_img, k_img, pe_img_cross)[0]
+
+    scale = q.shape[-1] ** -0.5
+    logits_tt = torch.matmul(q_txt_r, k_txt_r.transpose(-2, -1)) * scale
+    logits_ti = torch.matmul(q_txt_r, k_img_cross.transpose(-2, -1)) * scale
+    logits_it = torch.matmul(q_img_cross, k_txt_r.transpose(-2, -1)) * scale
+    logits_ii = torch.matmul(q_img_self, k_img_self.transpose(-2, -1)) * scale
+
+    values = torch.cat([v_txt, v_img], dim=2)
+    probs_txt = torch.softmax(torch.cat([logits_tt, logits_ti], dim=-1).float(), dim=-1).to(v.dtype)
+    probs_img = torch.softmax(torch.cat([logits_it, logits_ii], dim=-1).float(), dim=-1).to(v.dtype)
+    out_txt = torch.matmul(probs_txt, values)
+    out_img = torch.matmul(probs_img, values)
+    out = torch.cat([out_txt, out_img], dim=2)
+    return out.transpose(1, 2).reshape(out.shape[0], out.shape[2], -1)
+
+
 def apply_dype_to_model(model: ModelPatcher, model_type: str, width: int, height: int, method: str, yarn_alt_scaling: bool, enable_dype: bool, dype_scale: float, dype_exponent: float, base_shift: float, max_shift: float, base_resolution: int = 1024, dype_start_sigma: float = 1.0) -> ModelPatcher:
     m = model.clone()
 
@@ -136,6 +175,13 @@ def apply_dype_to_model(model: ModelPatcher, model_type: str, width: int, height
         theta, axes_dim, method, yarn_alt_scaling, enable_dype,
         dype_scale, dype_exponent, base_resolution, dype_start_sigma, embedder_base_patches
     )
+
+    if not (is_nunchaku or is_qwen or is_z_image):
+        new_pe_embedder.set_klein_cross_rope(
+            max(1.0, float(height) / float(base_resolution)),
+            max(1.0, float(width) / float(base_resolution)),
+        )
+        _patch_flux_klein_blocks(m.model.diffusion_model)
         
     m.add_object_patch(target_patch_path, new_pe_embedder)
 
@@ -266,3 +312,113 @@ def apply_dype_to_model(model: ModelPatcher, model_type: str, width: int, height
     m.set_model_unet_function_wrapper(dype_wrapper_function)
 
     return m
+
+def _patch_flux_klein_blocks(dm):
+    from comfy.ldm.flux.layers import apply_mod
+
+    def double_forward(self, img, txt, vec, pe, attn_mask=None, modulation_dims_img=None, modulation_dims_txt=None, transformer_options={}):
+        if attn_mask is not None or not isinstance(pe, tuple):
+            return self._dype_orig_forward(img, txt, vec, pe, attn_mask, modulation_dims_img, modulation_dims_txt, transformer_options)
+        if self.modulation:
+            img_mod1, img_mod2 = self.img_mod(vec)
+            txt_mod1, txt_mod2 = self.txt_mod(vec)
+        else:
+            (img_mod1, img_mod2), (txt_mod1, txt_mod2) = vec
+
+        transformer_patches = transformer_options.get("patches", {})
+        extra_options = transformer_options.copy()
+
+        img_modulated = self.img_norm1(img)
+        img_modulated = apply_mod(img_modulated, (1 + img_mod1.scale), img_mod1.shift, modulation_dims_img)
+        img_qkv = self.img_attn.qkv(img_modulated)
+        del img_modulated
+        img_q, img_k, img_v = img_qkv.view(img_qkv.shape[0], img_qkv.shape[1], 3, self.num_heads, -1).permute(2, 0, 3, 1, 4)
+        del img_qkv
+        img_q, img_k = self.img_attn.norm(img_q, img_k, img_v)
+
+        txt_modulated = self.txt_norm1(txt)
+        txt_modulated = apply_mod(txt_modulated, (1 + txt_mod1.scale), txt_mod1.shift, modulation_dims_txt)
+        txt_qkv = self.txt_attn.qkv(txt_modulated)
+        del txt_modulated
+        txt_q, txt_k, txt_v = txt_qkv.view(txt_qkv.shape[0], txt_qkv.shape[1], 3, self.num_heads, -1).permute(2, 0, 3, 1, 4)
+        del txt_qkv
+        txt_q, txt_k = self.txt_attn.norm(txt_q, txt_k, txt_v)
+
+        q = torch.cat((txt_q, img_q), dim=2)
+        del txt_q, img_q
+        k = torch.cat((txt_k, img_k), dim=2)
+        del txt_k, img_k
+        v = torch.cat((txt_v, img_v), dim=2)
+        del txt_v, img_v
+
+        num_txt_tokens = txt.shape[1]
+        extra_options["img_slice"] = [num_txt_tokens, q.shape[2]]
+        if "attn1_patch" in transformer_patches:
+            for p in transformer_patches["attn1_patch"]:
+                out = p(q, k, v, pe=pe, attn_mask=attn_mask, extra_options=extra_options)
+                q, k, v, pe, attn_mask = out.get("q", q), out.get("k", k), out.get("v", v), out.get("pe", pe), out.get("attn_mask", attn_mask)
+
+        attn = _flux_klein_attention(q, k, v, pe, num_txt_tokens)
+        del q, k, v
+
+        if "attn1_output_patch" in transformer_patches:
+            for p in transformer_patches["attn1_output_patch"]:
+                attn = p(attn, extra_options)
+
+        txt_attn, img_attn = attn[:, :num_txt_tokens], attn[:, num_txt_tokens:]
+        img += apply_mod(self.img_attn.proj(img_attn), img_mod1.gate, None, modulation_dims_img)
+        del img_attn
+        img += apply_mod(self.img_mlp(apply_mod(self.img_norm2(img), (1 + img_mod2.scale), img_mod2.shift, modulation_dims_img)), img_mod2.gate, None, modulation_dims_img)
+        txt += apply_mod(self.txt_attn.proj(txt_attn), txt_mod1.gate, None, modulation_dims_txt)
+        del txt_attn
+        txt += apply_mod(self.txt_mlp(apply_mod(self.txt_norm2(txt), (1 + txt_mod2.scale), txt_mod2.shift, modulation_dims_txt)), txt_mod2.gate, None, modulation_dims_txt)
+        if txt.dtype == torch.float16:
+            txt = torch.nan_to_num(txt, nan=0.0, posinf=65504, neginf=-65504)
+        return img, txt
+
+    def single_forward(self, x, vec, pe, attn_mask=None, modulation_dims=None, transformer_options={}):
+        if attn_mask is not None or not isinstance(pe, tuple):
+            return self._dype_orig_forward(x, vec, pe, attn_mask, modulation_dims, transformer_options)
+        if self.modulation:
+            mod, _ = self.modulation(vec)
+        else:
+            mod = vec
+
+        transformer_patches = transformer_options.get("patches", {})
+        extra_options = transformer_options.copy()
+        qkv, mlp = torch.split(self.linear1(apply_mod(self.pre_norm(x), (1 + mod.scale), mod.shift, modulation_dims)), [3 * self.hidden_size, self.mlp_hidden_dim_first], dim=-1)
+        q, k, v = qkv.view(qkv.shape[0], qkv.shape[1], 3, self.num_heads, -1).permute(2, 0, 3, 1, 4)
+        del qkv
+        q, k = self.norm(q, k, v)
+
+        if "attn1_patch" in transformer_patches:
+            for p in transformer_patches["attn1_patch"]:
+                out = p(q, k, v, pe=pe, attn_mask=attn_mask, extra_options=extra_options)
+                q, k, v, pe, attn_mask = out.get("q", q), out.get("k", k), out.get("v", v), out.get("pe", pe), out.get("attn_mask", attn_mask)
+
+        num_txt_tokens = transformer_options["img_slice"][0]
+        attn = _flux_klein_attention(q, k, v, pe, num_txt_tokens)
+        del q, k, v
+
+        if "attn1_output_patch" in transformer_patches:
+            for p in transformer_patches["attn1_output_patch"]:
+                attn = p(attn, extra_options)
+
+        if self.yak_mlp:
+            mlp = self.mlp_act(mlp[..., self.mlp_hidden_dim_first // 2:]) * mlp[..., :self.mlp_hidden_dim_first // 2]
+        else:
+            mlp = self.mlp_act(mlp)
+        output = self.linear2(torch.cat((attn, mlp), 2))
+        x += apply_mod(output, mod.gate, None, modulation_dims)
+        if x.dtype == torch.float16:
+            x = torch.nan_to_num(x, nan=0.0, posinf=65504, neginf=-65504)
+        return x
+
+    for block in list(dm.double_blocks) + list(dm.single_blocks):
+        if hasattr(block, "_dype_orig_forward"):
+            continue
+        block._dype_orig_forward = block.forward
+        if block in dm.double_blocks:
+            block.forward = types.MethodType(double_forward, block)
+        else:
+            block.forward = types.MethodType(single_forward, block)

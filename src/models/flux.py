@@ -6,7 +6,16 @@ class PosEmbedFlux(DyPEBasePosEmbed):
     DyPE Implementation for Standard ComfyUI Flux Models.
     Output Format: Rotation Matrix (concatenated) -> (B, 1, L, D)
     """
-    def forward(self, ids: torch.Tensor) -> torch.Tensor:
+    klein_cross_rope = False
+    cross_scale_h = 1.0
+    cross_scale_w = 1.0
+
+    def set_klein_cross_rope(self, scale_h: float, scale_w: float):
+        self.klein_cross_rope = True
+        self.cross_scale_h = max(float(scale_h), 1e-6)
+        self.cross_scale_w = max(float(scale_w), 1e-6)
+
+    def _embed(self, ids: torch.Tensor) -> torch.Tensor:
         pos = ids.float()
         freqs_dtype = torch.bfloat16 if pos.device.type == 'cuda' else torch.float32
         
@@ -23,3 +32,15 @@ class PosEmbedFlux(DyPEBasePosEmbed):
             
         emb = torch.cat(emb_parts, dim=-3)
         return emb.unsqueeze(1).to(ids.device)
+
+    def forward(self, ids: torch.Tensor) -> torch.Tensor:
+        pe_self = self._embed(ids)
+        if not self.klein_cross_rope:
+            return pe_self
+
+        ids_cross = ids.float().clone()
+        if ids_cross.shape[-1] > 1:
+            ids_cross[..., 1] /= self.cross_scale_h
+        if ids_cross.shape[-1] > 2:
+            ids_cross[..., 2] /= self.cross_scale_w
+        return pe_self, self._embed(ids_cross)
