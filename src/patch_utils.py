@@ -79,9 +79,19 @@ def apply_dype_to_model(model: ModelPatcher, model_type: str, width: int, height
         derived_base_patches = (base_resolution // 8) // patch_size
         derived_base_seq_len = derived_base_patches * derived_base_patches
 
-    if enable_dype and should_patch_schedule:
+    # Keep Flux2's established NTK scale calibration above, but give YaRN its
+    # actual image-token training grid: Flux2's VAE downsamples by 16 and its
+    # DiT patch size is 1.
+    flux2_yarn_base_patches = None
+    if is_flux2:
+        flux2_yarn_base_patches = math.ceil(base_resolution / (16 * patch_size))
+
+    # Flux2 ships with a native shift of 2.02.  Replacing it with the generic
+    # Flux schedule changes sampling independently of RoPE and destabilizes
+    # comparisons between extrapolation methods.
+    if enable_dype and should_patch_schedule and not is_flux2:
         try:
-            if isinstance(m.model.model_sampling, model_sampling.ModelSamplingFlux) or is_qwen or is_z_image or is_flux2:
+            if isinstance(m.model.model_sampling, model_sampling.ModelSamplingFlux) or is_qwen or is_z_image:
                 latent_h, latent_w = height // 8, width // 8
                 padded_h, padded_w = math.ceil(latent_h / patch_size) * patch_size, math.ceil(latent_w / patch_size) * patch_size
                 image_seq_len = (padded_h // patch_size) * (padded_w // patch_size)
@@ -109,7 +119,7 @@ def apply_dype_to_model(model: ModelPatcher, model_type: str, width: int, height
         except:
             pass
 
-    elif not enable_dype:
+    elif not enable_dype and not is_flux2:
         if hasattr(m.model, "_dype_params"):
             class DefaultModelSamplingFlux(model_sampling.ModelSamplingFlux, model_sampling.CONST): pass
             default_sampler = DefaultModelSamplingFlux(m.model.model_config)
@@ -142,10 +152,16 @@ def apply_dype_to_model(model: ModelPatcher, model_type: str, width: int, height
         embedder_cls = PosEmbedFlux2Klein
 
     embedder_base_patches = derived_base_patches if (is_z_image or is_flux2) else None
+    embedder_spatial_axes = (1, 2) if is_flux2 else None
+    embedder_yarn_base_patches = flux2_yarn_base_patches if is_flux2 else None
+    embedder_direct_yarn_positions = is_flux2
 
     new_pe_embedder = embedder_cls(
         theta, axes_dim, method, yarn_alt_scaling, enable_dype,
-        dype_scale, dype_exponent, base_resolution, dype_start_sigma, embedder_base_patches
+        dype_scale, dype_exponent, base_resolution, dype_start_sigma, embedder_base_patches,
+        spatial_axes=embedder_spatial_axes,
+        yarn_base_patch_grid=embedder_yarn_base_patches,
+        direct_yarn_positions=embedder_direct_yarn_positions,
     )
         
     m.add_object_patch(target_patch_path, new_pe_embedder)
