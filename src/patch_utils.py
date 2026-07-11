@@ -1,11 +1,10 @@
 import math
 import types
 import torch
-import torch.nn.functional as F
-import comfy
 from comfy.model_patcher import ModelPatcher
-from comfy import model_sampling
+from comfy import conds, model_sampling
 
+from .attention import Flux2AttentionCalibrator
 from .models.flux import PosEmbedFlux, PosEmbedFlux2Klein
 from .models.nunchaku import PosEmbedNunchaku
 from .models.qwen import PosEmbedQwen
@@ -75,20 +74,13 @@ def apply_dype_to_model(model: ModelPatcher, model_type: str, width: int, height
     if base_patch_h_tokens is not None and base_patch_w_tokens is not None:
         derived_base_patches = max(base_patch_h_tokens, base_patch_w_tokens)
         derived_base_seq_len = base_patch_h_tokens * base_patch_w_tokens
+    #elif is_flux2:
+    #    derived_base_patches = (base_resolution // 4) // patch_size
+    #    derived_base_seq_len = derived_base_patches * derived_base_patches
     else:
         derived_base_patches = (base_resolution // 8) // patch_size
         derived_base_seq_len = derived_base_patches * derived_base_patches
 
-    # Keep Flux2's established NTK scale calibration above, but give YaRN its
-    # actual image-token training grid: Flux2's VAE downsamples by 16 and its
-    # DiT patch size is 1.
-    flux2_yarn_base_patches = None
-    if is_flux2:
-        flux2_yarn_base_patches = math.ceil(base_resolution / (16 * patch_size))
-
-    # Flux2 ships with a native shift of 2.02.  Replacing it with the generic
-    # Flux schedule changes sampling independently of RoPE and destabilizes
-    # comparisons between extrapolation methods.
     if enable_dype and should_patch_schedule and not is_flux2:
         try:
             if isinstance(m.model.model_sampling, model_sampling.ModelSamplingFlux) or is_qwen or is_z_image:
@@ -152,19 +144,54 @@ def apply_dype_to_model(model: ModelPatcher, model_type: str, width: int, height
         embedder_cls = PosEmbedFlux2Klein
 
     embedder_base_patches = derived_base_patches if (is_z_image or is_flux2) else None
-    embedder_spatial_axes = (1, 2) if is_flux2 else None
-    embedder_yarn_base_patches = flux2_yarn_base_patches if is_flux2 else None
-    embedder_direct_yarn_positions = is_flux2
 
     new_pe_embedder = embedder_cls(
         theta, axes_dim, method, yarn_alt_scaling, enable_dype,
-        dype_scale, dype_exponent, base_resolution, dype_start_sigma, embedder_base_patches,
-        spatial_axes=embedder_spatial_axes,
-        yarn_base_patch_grid=embedder_yarn_base_patches,
-        direct_yarn_positions=embedder_direct_yarn_positions,
+        dype_scale, dype_exponent, base_resolution, dype_start_sigma, embedder_base_patches
     )
+    if is_flux2:
+        new_pe_embedder.set_scale_hint(base_resolution / max(width, height))
         
     m.add_object_patch(target_patch_path, new_pe_embedder)
+
+    if is_flux2 and enable_dype and method != "base":
+        original_extra_conds = m.model.extra_conds
+        attention_calibrator = Flux2AttentionCalibrator(
+            orig_embedder, width, height, base_resolution
+        )
+
+        def dype_flux2_extra_conds(self, **kwargs):
+            out = original_extra_conds(**kwargs)
+            mask = kwargs.get("attention_mask")
+            if mask is not None and "c_crossattn" in out:
+                length = out["c_crossattn"].cond.shape[1]
+                if mask.shape[-1] < length:
+                    mask = torch.nn.functional.pad(mask, (length - mask.shape[-1], 0))
+                elif mask.shape[-1] > length:
+                    mask = mask[..., -length:]
+                out["dype_text_mask"] = conds.CONDRegular(mask)
+            return out
+
+        m.add_object_patch("extra_conds", types.MethodType(dype_flux2_extra_conds, m.model))
+
+        def dype_flux2_attention(q, k, v, extra_options, **kwargs):
+            bias = attention_calibrator(
+                q, k, kwargs.get("pe"), extra_options.get("dype_text_mask")
+            )
+            if bias is None:
+                return {}
+
+            attn_mask = kwargs.get("attn_mask")
+            if attn_mask is not None:
+                while attn_mask.ndim < bias.ndim:
+                    attn_mask = attn_mask.unsqueeze(1)
+                if attn_mask.dtype == torch.bool:
+                    bias = bias.masked_fill(~attn_mask, torch.finfo(q.dtype).min)
+                else:
+                    bias = bias + attn_mask
+            return {"attn_mask": bias}
+
+        m.set_model_attn1_patch(dype_flux2_attention)
 
     if is_z_image:
         base_hw_override = None
@@ -280,20 +307,18 @@ def apply_dype_to_model(model: ModelPatcher, model_type: str, width: int, height
         
         input_x, c = args_dict.get("input"), args_dict.get("c", {})
 
-        if is_z_image and isinstance(input_x, torch.Tensor) and input_x.dim() >= 4:
+        if is_flux2 and "dype_text_mask" in c:
+            c = dict(c)
+            transformer_options = dict(c.get("transformer_options", {}))
+            transformer_options["dype_text_mask"] = c.pop("dype_text_mask")
+            c["transformer_options"] = transformer_options
+        elif is_z_image and isinstance(input_x, torch.Tensor) and input_x.dim() >= 4:
             c = dict(c)
             transformer_options = dict(c.get("transformer_options", {}))
             transformer_options["dype_original_hw"] = (input_x.shape[-2], input_x.shape[-1])
             transformer_options["dype_requested_hw"] = (height, width)
             transformer_options["dype_base_resolution"] = base_resolution
             c["transformer_options"] = transformer_options
-        elif is_flux2 and isinstance(input_x, torch.Tensor) and input_x.dim() >= 4:
-            target_hw = (height, width)
-            raw_scale_y = float(base_resolution) / max(1.0, float(target_hw[0]))
-            raw_scale_x = float(base_resolution) / max(1.0, float(target_hw[1]))
-            iso_scale = min(raw_scale_y, raw_scale_x)
-            new_pe_embedder.set_scale_hint(iso_scale)
-
         return model_function(input_x, args_dict.get("timestep"), **c)
 
     m.set_model_unet_function_wrapper(dype_wrapper_function)
